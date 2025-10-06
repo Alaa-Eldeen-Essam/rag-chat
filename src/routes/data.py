@@ -85,7 +85,6 @@ async def upload_data(request: Request, project_id: str, file: UploadFile,
             content={
                 "signal": ResponseSignal.FILE_UPLOAD_SUCCESS.value,
                 "file_id": str(asset_record.id),
-                "Asset_name": asset_record.asset_name,
             }
         )
 
