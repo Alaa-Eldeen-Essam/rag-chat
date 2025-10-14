@@ -2,6 +2,8 @@ from ..LLMInterface import LLMInterface
 from ..LLMEnums import OpenAIEnums
 from openai import OpenAI
 import logging
+import httpx
+
 
 class OpenAIProvider(LLMInterface):
 
@@ -24,7 +26,8 @@ class OpenAIProvider(LLMInterface):
 
         self.client = OpenAI(
             api_key = self.api_key,
-            base_url = self.api_url if self.api_url and len(self.api_url) else None
+            base_url = self.api_url if self.api_url and len(self.api_url) else None,
+            http_client=httpx.Client(trust_env=False)
         )
 
         self.enums = OpenAIEnums
