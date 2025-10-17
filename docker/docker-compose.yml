@@ -14,14 +14,12 @@ services:
     restart: always
 
   pgvector:
-    image: pgvector/pgvector:pg18-trixie
+    image: pgvector/pgvector:0.8.1-pg18
     container_name: pgvector
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: admin123
-      POSTGRES_DB: postgres
     volumes:
       - pgvector_data:/var/lib/postgresql/data
     networks:
@@ -30,7 +28,6 @@ services:
 
 networks:
   backend:
-    driver: bridge
 
 volumes:
   mongodata:
