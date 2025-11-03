@@ -1,7 +1,7 @@
 from .BaseController import BaseController
 from models.db_schemes import Project, DataChunk
 from stores.llm.LLMEnums import DocumentTypeEnum
-from typing import List
+from typing import List, Optional
 import json
 
 class NLPController(BaseController):
@@ -134,3 +134,47 @@ class NLPController(BaseController):
         )
 
         return answer, full_prompt, chat_history
+    
+    def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
+                         max_output_tokens: Optional[int] = 300):
+        if not chunks or len(chunks) == 0:
+            return None, None
+
+        system_prompt = self.template_parser.get("summary", "system_prompt") or (
+            "You are an assistant that condenses provided content into a clear, concise summary."
+        )
+
+        documents_prompts = "\n".join([
+            self.template_parser.get("summary", "document_prompt", {
+                "doc_num": chunk.chunk_order if chunk.chunk_order else idx + 1,
+                "chunk_text": self.generation_client.process_text(chunk.chunk_text),
+            }) or f"## Document {chunk.chunk_order if chunk.chunk_order else idx + 1}\n{self.generation_client.process_text(chunk.chunk_text)}"
+            for idx, chunk in enumerate(chunks)
+        ])
+
+        default_focus = self.template_parser.get("summary", "default_focus") or "Provide a concise summary that highlights the key ideas and critical details."
+
+        summary_prompt = self.template_parser.get("summary", "summary_prompt", {
+            "documents": documents_prompts,
+            "focus": focus or default_focus,
+        }) or "\n".join([
+            "Summarize the following documents.",
+            documents_prompts,
+            "",
+            focus or default_focus
+        ])
+
+        chat_history = [
+            self.generation_client.construct_prompt(
+                prompt=system_prompt,
+                role=self.generation_client.enums.SYSTEM.value,
+            )
+        ]
+
+        summary = self.generation_client.generate_text(
+            prompt=summary_prompt,
+            chat_history=chat_history,
+            max_output_tokens=max_output_tokens
+        )
+
+        return summary, summary_prompt

@@ -7,3 +7,9 @@ class PushRequest(BaseModel):
 class SearchRequest(BaseModel):
     text: str
     limit: Optional[int] = 5
+
+class SummarizeRequest(BaseModel):
+    file_id: Optional[str] = None
+    max_chunks: Optional[int] = 20
+    max_output_tokens: Optional[int] = None
+    focus: Optional[str] = None

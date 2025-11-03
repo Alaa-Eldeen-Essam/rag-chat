@@ -56,3 +56,22 @@ class ChunkModel(BaseDataModel):
             result = await session.execute(stmt)
             records = result.scalars().all()
         return records
+    
+    async def get_project_chunks_for_summary(self, project_id: ObjectId, asset_id: int=None, limit: int=None):
+        async with self.db_client() as session:
+            stmt = select(DataChunk).where(DataChunk.chunk_project_id == project_id)
+
+            if asset_id:
+                stmt = stmt.where(DataChunk.chunk_asset_id == asset_id)
+
+            stmt = stmt.order_by(
+                DataChunk.chunk_asset_id.asc(),
+                DataChunk.chunk_order.asc()
+            )
+
+            if limit:
+                stmt = stmt.limit(limit)
+
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+        return records

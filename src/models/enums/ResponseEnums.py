@@ -19,3 +19,5 @@ class ResponseSignal(Enum):
     VECTORDB_SEARCH_SUCCESS = "vectordb_search_success"
     RAG_ANSWER_ERROR = "rag_answer_error"
     RAG_ANSWER_SUCCESS = "rag_answer_success"
+    SUMMARY_GENERATION_ERROR = "summary_generation_error"
+    SUMMARY_GENERATION_SUCCESS = "summary_generation_success"
