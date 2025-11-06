@@ -78,3 +78,23 @@ class AssetModel(BaseDataModel):
             if not self._can_user_access(asset=record, current_user=current_user):
                 return None, True
         return record, True
+
+    async def get_asset_by_id(self, asset_id: int, current_user):
+
+        async with self.db_client() as session:
+            stmt = select(Asset).where(Asset.asset_id == asset_id)
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+
+            if record is None:
+                return None, False
+
+            if not self._can_user_access(asset=record, current_user=current_user):
+                return None, True
+        return record, True
+
+    async def delete_asset(self, asset: Asset):
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.delete(asset)
+            await session.commit()

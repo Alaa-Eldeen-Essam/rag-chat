@@ -51,6 +51,15 @@ class ChatHistoryModel(BaseDataModel):
             records = result.scalars().all()
         return list(reversed(records))
 
+    async def get_full_history_by_conversation(self, conversation_id: int):
+        async with self.db_client() as session:
+            result = await session.execute(
+                select(ChatHistory)
+                .where(ChatHistory.conversation_id == conversation_id)
+                .order_by(ChatHistory.timestamp)
+            )
+            return result.scalars().all()
+
     async def trim_history_for_conversation(self, conversation_id: int):
         async with self.db_client() as session:
             result = await session.execute(

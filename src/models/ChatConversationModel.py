@@ -40,6 +40,18 @@ class ChatConversationModel(BaseDataModel):
             )
             return result.scalar_one_or_none()
 
+    async def list_conversations(self, user_id: int):
+        async with self.db_client() as session:
+            result = await session.execute(
+                select(ChatConversation)
+                .where(ChatConversation.conversation_user_id == user_id)
+                .order_by(
+                    ChatConversation.updated_at.desc(),
+                    ChatConversation.created_at.desc()
+                )
+            )
+            return result.scalars().all()
+
     async def update_conversation_title(self, conversation_id: int, user_id: int, title: str):
         async with self.db_client() as session:
             async with session.begin():

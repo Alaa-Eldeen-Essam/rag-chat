@@ -65,7 +65,8 @@ class NLPController(BaseController):
         return True
 
     def search_vector_db_collection(self, project: Project, text: str, limit: int = 10,
-                                    doc_types: Optional[List[str]] = None):
+                                    doc_types: Optional[List[str]] = None,
+                                    asset_ids: Optional[List[int]] = None):
 
         # step1: get collection name
         collection_name = self.create_collection_name(project_id=project.project_id)
@@ -102,6 +103,29 @@ class NLPController(BaseController):
                     filtered_results.append(result)
 
             if filtered_results:
+                results = filtered_results
+            else:
+                return []
+
+        if asset_ids:
+            asset_id_set = {int(asset_id) for asset_id in asset_ids if asset_id is not None}
+            filtered_results = []
+            for result in results:
+                metadata = getattr(result, "metadata", None)
+                metadata_asset_id = None
+                if isinstance(metadata, dict):
+                    metadata_asset_id = metadata.get("asset_id")
+                elif metadata is not None and hasattr(metadata, "get"):
+                    metadata_asset_id = metadata.get("asset_id")
+
+                if metadata_asset_id is not None:
+                    try:
+                        if int(metadata_asset_id) in asset_id_set:
+                            filtered_results.append(result)
+                    except (ValueError, TypeError):
+                        continue
+
+            if filtered_results:
                 return filtered_results
             return []
 
@@ -110,7 +134,8 @@ class NLPController(BaseController):
     def answer_rag_question(self, project: Project, query: str, limit: int = 10,
                             chat_messages: Optional[List[Dict[str, str]]] = None,
                             stream: bool = False, collector: Optional[dict] = None,
-                            doc_types: Optional[List[str]] = None):
+                            doc_types: Optional[List[str]] = None,
+                            asset_ids: Optional[List[int]] = None):
         
         answer_or_stream, full_prompt, chat_history = None, None, None
 
@@ -120,6 +145,7 @@ class NLPController(BaseController):
             text=query,
             limit=limit,
             doc_types=doc_types,
+            asset_ids=asset_ids,
         )
 
         if not retrieved_documents or len(retrieved_documents) == 0:

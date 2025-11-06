@@ -10,6 +10,7 @@ class SearchRequest(BaseModel):
     stream: Optional[bool] = False
     conversation_id: Optional[int] = None
     model: Optional[str] = None
+    asset_id: Optional[int] = None
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None

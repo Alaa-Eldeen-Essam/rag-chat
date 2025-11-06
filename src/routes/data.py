@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, status, Request
+from fastapi import APIRouter, Depends, UploadFile, status, Request, Form
 from fastapi.responses import JSONResponse
 import os
 from helpers.config import get_settings, Settings
@@ -27,7 +27,7 @@ DOCUMENT_TYPE_DEFAULT = "general"
 def normalize_document_type(value: str) -> str:
     if not value:
         return DOCUMENT_TYPE_DEFAULT
-    normalized = value.strip().lower()
+    normalized = value.strip()
     return normalized if normalized else DOCUMENT_TYPE_DEFAULT
 
 @data_router.post("/upload/{project_id}")
@@ -35,8 +35,8 @@ async def upload_data(
     request: Request,
     project_id: int,
     file: UploadFile,
-    is_private: bool = True,
-    doc_type: str = DOCUMENT_TYPE_DEFAULT,
+    is_private: bool = Form(True),
+    doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
@@ -109,6 +109,9 @@ async def upload_data(
         asset_size=os.path.getsize(file_path),
         asset_is_private=is_private,
         asset_document_type=normalized_doc_type,
+        asset_config={
+            "original_filename": file.filename
+        },
     )
 
     asset_record = await asset_model.create_asset(asset=asset_resource)
@@ -117,6 +120,8 @@ async def upload_data(
             content={
                 "signal": ResponseSignal.FILE_UPLOAD_SUCCESS.value,
                 "file_id": str(asset_record.asset_id),
+                "stored_file_name": asset_record.asset_name,
+                "original_file_name": file.filename,
                 "is_private": asset_record.asset_is_private,
                 "doc_type": asset_record.asset_document_type,
             }
@@ -255,7 +260,8 @@ async def process_endpoint(
                 chunk_text=chunk.page_content,
                 chunk_metadata={
                     **(chunk.metadata or {}),
-                    "doc_type": document_type
+                    "doc_type": document_type,
+                    "asset_id": asset_id,
                 },
                 chunk_order=i+1,
                 chunk_project_id=project.project_id,
@@ -272,5 +278,112 @@ async def process_endpoint(
             "signal": ResponseSignal.PROCESSING_SUCCESS.value,
             "inserted_chunks": no_records,
             "processed_files": no_files
+        }
+    )
+
+@data_router.get("/assets/{project_id}")
+async def list_assets(
+    request: Request,
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    project_model = await ProjectModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None
+    )
+
+    if not project:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
+
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    assets = await asset_model.get_all_project_assets(
+        asset_project_id=project.project_id,
+        asset_type=AssetTypeEnum.FILE.value,
+        current_user=current_user
+    )
+
+    payload = []
+    for asset in assets:
+        original_name = None
+        if asset.asset_config and isinstance(asset.asset_config, dict):
+            original_name = asset.asset_config.get("original_filename")
+
+        payload.append(
+            {
+                "asset_id": asset.asset_id,
+                "project_id": asset.asset_project_id,
+                "user_id": asset.asset_user_id,
+                "name": asset.asset_name,
+                "original_name": original_name,
+                "doc_type": asset.asset_document_type or DOCUMENT_TYPE_DEFAULT,
+                "is_private": asset.asset_is_private,
+                "size": asset.asset_size,
+                "created_at": asset.created_at.isoformat() if getattr(asset, "created_at", None) else None,
+                "updated_at": asset.updated_at.isoformat() if getattr(asset, "updated_at", None) else None,
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_LIST_SUCCESS.value,
+            "assets": payload
+        }
+    )
+@data_router.delete("/assets/{asset_id}")
+async def delete_asset(
+    request: Request,
+    asset_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user
+    )
+
+    if asset_record is None:
+        if exists_or_forbidden:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
+                }
+            )
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.FILE_ID_ERROR.value
+            }
+        )
+
+    chunk_model = await ChunkModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+    await asset_model.delete_asset(asset_record)
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_DELETE_SUCCESS.value
         }
     )

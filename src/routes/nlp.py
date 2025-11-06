@@ -6,11 +6,12 @@ from models.ChunkModel import ChunkModel
 from controllers import NLPController
 from models import ResponseSignal
 from models.AssetModel import AssetModel
-from models.ChatHistoryModel import ChatHistoryModel
+from models.ChatHistoryModel import ChatHistoryModel, MAX_CONVERSATION_MESSAGES
 from models.ChatConversationModel import ChatConversationModel
-from models.db_schemes import User
+from models.db_schemes import User, Asset
 from routes.dependencies import get_current_user
 from models.enums.AssetTypeEnum import AssetTypeEnum
+from sqlalchemy import select
 
 import logging
 import json
@@ -177,6 +178,127 @@ async def get_project_index_info(
         }
     )
 
+@nlp_router.get("/conversations")
+async def list_conversations(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    conversation_model = await ChatConversationModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    conversations = await conversation_model.list_conversations(user_id=current_user.id)
+
+    payload = [
+        {
+            "conversation_id": conversation.conversation_id,
+            "title": conversation.conversation_title,
+            "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
+            "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
+        }
+        for conversation in conversations
+    ]
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.CONVERSATIONS_FETCH_SUCCESS.value,
+            "conversations": payload
+        }
+    )
+
+@nlp_router.get("/doc-types")
+async def list_user_doc_types(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    async with request.app.db_client() as session:
+        result = await session.execute(
+            select(Asset.asset_document_type)
+            .where(
+                Asset.asset_user_id == current_user.id,
+                Asset.asset_document_type.isnot(None)
+            )
+            .distinct()
+        )
+        doc_types = sorted(
+            {
+                (value or "").strip()
+                for (value,) in result.all()
+                if value and value.strip()
+            },
+            key=lambda item: item.lower()
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
+            "doc_types": doc_types
+        }
+    )
+@nlp_router.get("/conversations/{conversation_id}/history")
+async def get_conversation_history(
+    request: Request,
+    conversation_id: int,
+    limit: Optional[int] = Query(None, ge=1, le=MAX_CONVERSATION_MESSAGES),
+    current_user: User = Depends(get_current_user),
+):
+    conversation_model = await ChatConversationModel.create_instance(
+        db_client=request.app.db_client
+    )
+    chat_history_model = await ChatHistoryModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    conversation = await conversation_model.get_conversation(
+        conversation_id=conversation_id,
+        user_id=current_user.id
+    )
+
+    if not conversation:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value,
+                "detail": "Conversation not found."
+            }
+        )
+
+    if limit:
+        history = await chat_history_model.get_recent_history_by_conversation(
+            conversation_id=conversation_id,
+            limit=limit
+        )
+    else:
+        history = await chat_history_model.get_full_history_by_conversation(
+            conversation_id=conversation_id
+        )
+
+    history_payload = [
+        {
+            "id": record.id,
+            "prompt": record.prompt,
+            "answer": record.answer,
+            "model_key": record.model_key,
+            "doc_types": record.doc_types,
+            "timestamp": record.timestamp.isoformat() if record.timestamp else None,
+            "response_time_ms": record.response_time_ms,
+        }
+        for record in history
+    ]
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
+            "conversation": {
+                "conversation_id": conversation.conversation_id,
+                "title": conversation.conversation_title,
+                "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
+                "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
+            },
+            "history": history_payload,
+        }
+    )
+
 @nlp_router.post("/index/search/{project_id}")
 async def search_index(
     request: Request,
@@ -320,6 +442,7 @@ async def answer_rag(
 
     collector = {"output": [], "reasoning": []} if search_request.stream else None
     doc_type_filter = extract_document_types_from_query(search_request.text)
+    asset_filter = search_request.asset_id
     start_time = time.perf_counter()
 
     answer_result, full_prompt, chat_history = nlp_controller.answer_rag_question(
@@ -330,6 +453,7 @@ async def answer_rag(
         stream=bool(search_request.stream),
         collector=collector,
         doc_types=doc_type_filter if doc_type_filter else None,
+        asset_ids=[asset_filter] if asset_filter else None,
     )
 
     if full_prompt is None or chat_history is None:
@@ -399,6 +523,10 @@ async def answer_rag(
                     )
                     await conversation_model.touch_conversation(conversation.conversation_id)
 
+                history_filter = doc_type_filter.copy() if doc_type_filter else []
+                if asset_filter is not None:
+                    history_filter.append(f"asset:{asset_filter}")
+
                 payload = {
                     "signal": signal_value,
                     "answer": final_answer,
@@ -406,9 +534,10 @@ async def answer_rag(
                     "chat_history": chat_history,
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
-                    "document_types": doc_type_filter or ["all"],
+                    "document_types": history_filter or ["all"],
                     "model": model_key_used,
                     "model_id": generation_models.get(model_key_used),
+                    "asset_id": asset_filter,
                 }
                 yield json.dumps(payload) + "\n"
 
@@ -428,13 +557,17 @@ async def answer_rag(
 
     response_time_ms = int((time.perf_counter() - start_time) * 1000)
 
+    history_filter = doc_type_filter.copy() if doc_type_filter else []
+    if asset_filter is not None:
+        history_filter.append(f"asset:{asset_filter}")
+
     await chat_history_model.create_history(
         user_id=current_user.id,
         conversation_id=conversation.conversation_id,
         prompt=search_request.text,
         answer=answer,
         model_key=model_key_used,
-        doc_types=doc_type_filter or ["all"],
+        doc_types=history_filter or ["all"],
         response_time_ms=response_time_ms,
     )
     await conversation_model.touch_conversation(conversation.conversation_id)
@@ -447,9 +580,10 @@ async def answer_rag(
             "chat_history": chat_history,
             "conversation_id": conversation.conversation_id,
             "conversation_title": conversation.conversation_title,
-            "document_types": doc_type_filter or ["all"],
+            "document_types": history_filter or ["all"],
             "model": model_key_used,
             "model_id": generation_models.get(model_key_used),
+            "asset_id": asset_filter,
         }
     )
 
