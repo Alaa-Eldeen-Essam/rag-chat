@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routes import base, data, nlp, users
+from routes import base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
@@ -24,9 +24,32 @@ async def startup_span():
     llm_provider_factory = LLMProviderFactory(settings)
     vectordb_provider_factory = VectorDBProviderFactory(settings)
 
-    # generation client
-    app.generation_client = llm_provider_factory.create(provider=settings.GENERATION_BACKEND)
-    app.generation_client.set_generation_model(model_id = settings.GENERATION_MODEL_ID)
+    generation_models = {
+        "best": settings.BEST_GENERATION_MODEL_ID or settings.GENERATION_MODEL_ID,
+        "thinking": settings.THINKING_GENERATION_MODEL_ID,
+        "fast": settings.FAST_GENERATION_MODEL_ID,
+    }
+    generation_models = {
+        key: value for key, value in generation_models.items() if value
+    }
+
+    if not generation_models:
+        raise ValueError("No generation models configured. Please update environment variables.")
+
+    default_model_key = settings.DEFAULT_GENERATION_MODEL_KEY.lower() if settings.DEFAULT_GENERATION_MODEL_KEY else None
+    if not default_model_key or default_model_key not in generation_models:
+        default_model_key = "best" if "best" in generation_models else next(iter(generation_models.keys()))
+
+    app.generation_model_ids = generation_models
+    app.default_generation_model_key = default_model_key
+    app.generation_clients = {}
+
+    for key, model_id in generation_models.items():
+        client = llm_provider_factory.create(provider=settings.GENERATION_BACKEND)
+        client.set_generation_model(model_id=model_id)
+        app.generation_clients[key] = client
+
+    app.generation_client = app.generation_clients[default_model_key]
 
     # embedding client
     app.embedding_client = llm_provider_factory.create(provider=settings.EMBEDDING_BACKEND)
@@ -63,3 +86,4 @@ app.include_router(base.base_router)
 app.include_router(data.data_router)
 app.include_router(nlp.nlp_router)
 app.include_router(users.users_router)
+app.include_router(stats.stats_router)

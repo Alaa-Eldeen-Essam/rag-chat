@@ -1,4 +1,4 @@
-from fastapi import APIRouter, status, Request, Depends
+from fastapi import APIRouter, status, Request, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest
 from models.ProjectModel import ProjectModel
@@ -14,6 +14,7 @@ from models.enums.AssetTypeEnum import AssetTypeEnum
 
 import logging
 import json
+import time
 from typing import List, Optional
 
 logger = logging.getLogger('uvicorn.error')
@@ -260,9 +261,19 @@ async def answer_rag(
             }
         )
 
+    generation_clients = getattr(request.app, "generation_clients", {})
+    generation_models = getattr(request.app, "generation_model_ids", {})
+    default_model_key = getattr(request.app, "default_generation_model_key", None)
+    default_generation_client = getattr(request.app, "generation_client", None)
+
+    requested_model_key = (search_request.model or default_model_key or "best").lower()
+    generation_client = generation_clients.get(requested_model_key) or default_generation_client
+    model_key_used = requested_model_key if generation_client else default_model_key or "best"
+    generation_client = generation_client or default_generation_client
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
+        generation_client=generation_client,
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
     )
@@ -308,8 +319,8 @@ async def answer_rag(
     ]
 
     collector = {"output": [], "reasoning": []} if search_request.stream else None
-
     doc_type_filter = extract_document_types_from_query(search_request.text)
+    start_time = time.perf_counter()
 
     answer_result, full_prompt, chat_history = nlp_controller.answer_rag_question(
         project=project,
@@ -361,6 +372,8 @@ async def answer_rag(
                     "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
+                    "model": model_key_used,
+                    "model_id": generation_models.get(model_key_used),
                 }) + "\n"
 
                 for chunk in answer_result:
@@ -374,11 +387,15 @@ async def answer_rag(
                 signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
 
                 if final_answer:
+                    response_time_ms = int((time.perf_counter() - start_time) * 1000)
                     await chat_history_model.create_history(
                         user_id=current_user.id,
                         conversation_id=conversation.conversation_id,
                         prompt=search_request.text,
                         answer=final_answer,
+                        model_key=model_key_used,
+                        doc_types=doc_type_filter or ["all"],
+                        response_time_ms=response_time_ms,
                     )
                     await conversation_model.touch_conversation(conversation.conversation_id)
 
@@ -390,6 +407,8 @@ async def answer_rag(
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
                     "document_types": doc_type_filter or ["all"],
+                    "model": model_key_used,
+                    "model_id": generation_models.get(model_key_used),
                 }
                 yield json.dumps(payload) + "\n"
 
@@ -407,11 +426,16 @@ async def answer_rag(
             }
         )
 
+    response_time_ms = int((time.perf_counter() - start_time) * 1000)
+
     await chat_history_model.create_history(
         user_id=current_user.id,
         conversation_id=conversation.conversation_id,
         prompt=search_request.text,
         answer=answer,
+        model_key=model_key_used,
+        doc_types=doc_type_filter or ["all"],
+        response_time_ms=response_time_ms,
     )
     await conversation_model.touch_conversation(conversation.conversation_id)
 
@@ -424,6 +448,8 @@ async def answer_rag(
             "conversation_id": conversation.conversation_id,
             "conversation_title": conversation.conversation_title,
             "document_types": doc_type_filter or ["all"],
+            "model": model_key_used,
+            "model_id": generation_models.get(model_key_used),
         }
     )
 

@@ -2,6 +2,7 @@ from .BaseDataModel import BaseDataModel
 from .db_schemes import ChatHistory
 from sqlalchemy.future import select
 from sqlalchemy import desc, delete
+from typing import Optional, List
 
 MAX_CONVERSATION_MESSAGES = 40
 RECENT_HISTORY_LIMIT = 5
@@ -18,7 +19,10 @@ class ChatHistoryModel(BaseDataModel):
         instance = cls(db_client)
         return instance
 
-    async def create_history(self, user_id: int, conversation_id: int, prompt: str, answer: str):
+    async def create_history(self, user_id: int, conversation_id: int, prompt: str, answer: str,
+                             model_key: Optional[str] = None,
+                             doc_types: Optional[List[str]] = None,
+                             response_time_ms: Optional[int] = None):
         async with self.db_client() as session:
             async with session.begin():
                 record = ChatHistory(
@@ -26,6 +30,9 @@ class ChatHistoryModel(BaseDataModel):
                     conversation_id=conversation_id,
                     prompt=prompt,
                     answer=answer,
+                    model_key=model_key,
+                    doc_types=doc_types,
+                    response_time_ms=response_time_ms,
                 )
                 session.add(record)
             await session.commit()

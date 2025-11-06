@@ -1,6 +1,7 @@
 from .minirag_base import SQLAlchemyBase
-from sqlalchemy import Column, Integer, Text, DateTime, func, ForeignKey
+from sqlalchemy import Column, Integer, Text, DateTime, func, ForeignKey, String
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB
 
 class ChatHistory(SQLAlchemyBase):
 
@@ -12,6 +13,9 @@ class ChatHistory(SQLAlchemyBase):
     prompt = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    response_time_ms = Column(Integer, nullable=True)
+    model_key = Column(String, nullable=True)
+    doc_types = Column(JSONB, nullable=True)
 
     user = relationship("User", back_populates="chat_history")
     conversation = relationship("ChatConversation", back_populates="history")

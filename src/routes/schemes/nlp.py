@@ -9,6 +9,7 @@ class SearchRequest(BaseModel):
     limit: Optional[int] = 5
     stream: Optional[bool] = False
     conversation_id: Optional[int] = None
+    model: Optional[str] = None
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None

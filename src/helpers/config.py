@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     COHERE_API_KEY: str = None
 
     GENERATION_MODEL_ID: str = None
+    BEST_GENERATION_MODEL_ID: str = None
+    THINKING_GENERATION_MODEL_ID: str = None
+    FAST_GENERATION_MODEL_ID: str = None
+    DEFAULT_GENERATION_MODEL_KEY: str = None
     EMBEDDING_MODEL_ID: str = None
     EMBEDDING_MODEL_SIZE: int = None
     INPUT_DAFAULT_MAX_CHARACTERS: int = None
