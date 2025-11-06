@@ -1,10 +1,10 @@
 from .BaseDataModel import BaseDataModel
 from .db_schemes import DataChunk
-from .enums.DataBaseEnum import DataBaseEnum
 from bson.objectid import ObjectId
 from pymongo import InsertOne
 from sqlalchemy.future import select
 from sqlalchemy import func, delete
+from typing import List, Optional
 
 class ChunkModel(BaseDataModel):
 
@@ -57,11 +57,13 @@ class ChunkModel(BaseDataModel):
             records = result.scalars().all()
         return records
     
-    async def get_project_chunks_for_summary(self, project_id: ObjectId, asset_id: int=None, limit: int=None):
+    async def get_project_chunks_for_summary(self, project_id: ObjectId, asset_id: int=None, asset_ids: Optional[List[int]] = None, limit: int=None):
         async with self.db_client() as session:
             stmt = select(DataChunk).where(DataChunk.chunk_project_id == project_id)
 
-            if asset_id:
+            if asset_ids:
+                stmt = stmt.where(DataChunk.chunk_asset_id.in_(asset_ids))
+            elif asset_id:
                 stmt = stmt.where(DataChunk.chunk_asset_id == asset_id)
 
             stmt = stmt.order_by(

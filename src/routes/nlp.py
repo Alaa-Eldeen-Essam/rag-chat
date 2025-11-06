@@ -1,13 +1,20 @@
-from fastapi import FastAPI, APIRouter, status, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, status, Request, Depends
+from fastapi.responses import JSONResponse, StreamingResponse
 from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
 from controllers import NLPController
 from models import ResponseSignal
 from models.AssetModel import AssetModel
+from models.ChatHistoryModel import ChatHistoryModel
+from models.ChatConversationModel import ChatConversationModel
+from models.db_schemes import User
+from routes.dependencies import get_current_user
+from models.enums.AssetTypeEnum import AssetTypeEnum
 
 import logging
+import json
+from typing import List, Optional
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -16,8 +23,40 @@ nlp_router = APIRouter(
     tags=["api_v1", "nlp"],
 )
 
+KNOWN_DOCUMENT_TYPES = {"general", "military", "law", "finance"}
+FILTERABLE_DOCUMENT_TYPES = KNOWN_DOCUMENT_TYPES - {"general"}
+
+
+def extract_document_types_from_query(query: str) -> List[str]:
+    if not query:
+        return []
+
+    lowered = query.lower()
+    matches = set()
+
+    for doc_type in FILTERABLE_DOCUMENT_TYPES:
+        trigger_phrases = [
+            f"{doc_type} doc",
+            f"{doc_type} docs",
+            f"{doc_type} document",
+            f"{doc_type} documents",
+            f"from {doc_type}",
+            f"in {doc_type} doc",
+            f"in {doc_type} documents",
+        ]
+
+        if any(phrase in lowered for phrase in trigger_phrases):
+            matches.add(doc_type)
+
+    return list(matches)
+
 @nlp_router.post("/index/push/{project_id}")
-async def index_project(request: Request, project_id: int, push_request: PushRequest):
+async def index_project(
+    request: Request,
+    project_id: int,
+    push_request: PushRequest,
+    current_user: User = Depends(get_current_user),
+):
 
     project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
@@ -27,15 +66,21 @@ async def index_project(request: Request, project_id: int, push_request: PushReq
         db_client=request.app.db_client
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None,
+        require_owner=True,
     )
 
     if not project:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
         return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=response_status,
             content={
-                "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+                "signal": response_signal
             }
         )
     
@@ -88,15 +133,32 @@ async def index_project(request: Request, project_id: int, push_request: PushReq
     )
 
 @nlp_router.get("/index/info/{project_id}")
-async def get_project_index_info(request: Request, project_id: int):
+async def get_project_index_info(
+    request: Request,
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+):
     
     project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None,
     )
+
+    if not project:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
 
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
@@ -115,15 +177,33 @@ async def get_project_index_info(request: Request, project_id: int):
     )
 
 @nlp_router.post("/index/search/{project_id}")
-async def search_index(request: Request, project_id: int, search_request: SearchRequest):
+async def search_index(
+    request: Request,
+    project_id: int,
+    search_request: SearchRequest,
+    current_user: User = Depends(get_current_user),
+):
     
     project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None,
     )
+
+    if not project:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
 
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
@@ -152,15 +232,33 @@ async def search_index(request: Request, project_id: int, search_request: Search
     )
 
 @nlp_router.post("/index/answer/{project_id}")
-async def answer_rag(request: Request, project_id: int, search_request: SearchRequest):
+async def answer_rag(
+    request: Request,
+    project_id: int,
+    search_request: SearchRequest,
+    current_user: User = Depends(get_current_user),
+):
     
     project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None,
     )
+
+    if not project:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
 
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
@@ -169,31 +267,173 @@ async def answer_rag(request: Request, project_id: int, search_request: SearchRe
         template_parser=request.app.template_parser,
     )
 
-    answer, full_prompt, chat_history = nlp_controller.answer_rag_question(
+    chat_history_model = await ChatHistoryModel.create_instance(
+        db_client=request.app.db_client
+    )
+    conversation_model = await ChatConversationModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    conversation = None
+    if search_request.conversation_id:
+        conversation = await conversation_model.get_conversation(
+            conversation_id=search_request.conversation_id,
+            user_id=current_user.id,
+        )
+        if not conversation:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value,
+                    "detail": "Conversation not found."
+                }
+            )
+    else:
+        conversation = await conversation_model.create_conversation(
+            user_id=current_user.id,
+            initial_prompt=search_request.text
+        )
+
+    recent_history = await chat_history_model.get_recent_history_by_conversation(
+        conversation_id=conversation.conversation_id,
+        limit=5
+    )
+
+    chat_messages = [
+        {
+            "prompt": record.prompt,
+            "answer": record.answer,
+        }
+        for record in recent_history
+    ]
+
+    collector = {"output": [], "reasoning": []} if search_request.stream else None
+
+    doc_type_filter = extract_document_types_from_query(search_request.text)
+
+    answer_result, full_prompt, chat_history = nlp_controller.answer_rag_question(
         project=project,
         query=search_request.text,
         limit=search_request.limit,
+        chat_messages=chat_messages,
+        stream=bool(search_request.stream),
+        collector=collector,
+        doc_types=doc_type_filter if doc_type_filter else None,
     )
 
-    if not answer:
+    if full_prompt is None or chat_history is None:
         return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "conversation_id": conversation.conversation_id,
+                "conversation_title": conversation.conversation_title,
+            }
+        )
+
+    def compose_final_answer(store: dict) -> str:
+        output_text = "".join(store.get("output", [])) if store else ""
+        reasoning_text = "".join(store.get("reasoning", [])) if store else ""
+
+        output_text = output_text.strip()
+        reasoning_text = reasoning_text.strip()
+
+        if output_text and reasoning_text:
+            return f"{output_text}\n\nReasoning:\n{reasoning_text}"
+        if output_text:
+            return output_text
+        if reasoning_text:
+            return reasoning_text
+        return ""
+
+    if search_request.stream:
+        if answer_result is None:
+            return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
                     "signal": ResponseSignal.RAG_ANSWER_ERROR.value
                 }
+            )
+
+        async def event_stream():
+            try:
+                yield json.dumps({
+                    "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
+                    "conversation_id": conversation.conversation_id,
+                    "conversation_title": conversation.conversation_title,
+                }) + "\n"
+
+                for chunk in answer_result:
+                    if chunk:
+                        yield json.dumps({
+                            "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
+                            "delta": chunk
+                        }) + "\n"
+            finally:
+                final_answer = compose_final_answer(collector)
+                signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
+
+                if final_answer:
+                    await chat_history_model.create_history(
+                        user_id=current_user.id,
+                        conversation_id=conversation.conversation_id,
+                        prompt=search_request.text,
+                        answer=final_answer,
+                    )
+                    await conversation_model.touch_conversation(conversation.conversation_id)
+
+                payload = {
+                    "signal": signal_value,
+                    "answer": final_answer,
+                    "full_prompt": full_prompt,
+                    "chat_history": chat_history,
+                    "conversation_id": conversation.conversation_id,
+                    "conversation_title": conversation.conversation_title,
+                    "document_types": doc_type_filter or ["all"],
+                }
+                yield json.dumps(payload) + "\n"
+
+        return StreamingResponse(event_stream(), media_type="application/json")
+
+    answer = answer_result
+
+    if not answer:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "conversation_id": conversation.conversation_id,
+                "conversation_title": conversation.conversation_title,
+            }
         )
-    
+
+    await chat_history_model.create_history(
+        user_id=current_user.id,
+        conversation_id=conversation.conversation_id,
+        prompt=search_request.text,
+        answer=answer,
+    )
+    await conversation_model.touch_conversation(conversation.conversation_id)
+
     return JSONResponse(
         content={
             "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
             "answer": answer,
             "full_prompt": full_prompt,
-            "chat_history": chat_history
+            "chat_history": chat_history,
+            "conversation_id": conversation.conversation_id,
+            "conversation_title": conversation.conversation_title,
+            "document_types": doc_type_filter or ["all"],
         }
     )
 
 @nlp_router.post("/summary/{project_id}")
-async def summarize_project(request: Request, project_id: int, summarize_request: SummarizeRequest):
+async def summarize_project(
+    request: Request,
+    project_id: int,
+    summarize_request: SummarizeRequest,
+    current_user: User = Depends(get_current_user),
+):
 
     project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
@@ -207,38 +447,74 @@ async def summarize_project(request: Request, project_id: int, summarize_request
         db_client=request.app.db_client
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None,
     )
+
+    if not project:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
 
     target_asset_id = None
     selected_file = None
+    accessible_asset_ids = []
 
     if summarize_request.file_id:
-        asset_record = await asset_model.get_asset_record(
+        asset_record, record_exists = await asset_model.get_asset_record(
             asset_project_id=project.project_id,
-            asset_name=summarize_request.file_id
+            asset_name=summarize_request.file_id,
+            current_user=current_user,
         )
 
         if asset_record is None:
+            signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if record_exists else ResponseSignal.FILE_ID_ERROR.value
+            status_code_response = status.HTTP_403_FORBIDDEN if record_exists else status.HTTP_400_BAD_REQUEST
+            detail = "File is private to another user." if record_exists else "No file found with the provided file identifier."
             return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status_code_response,
                 content={
-                    "signal": ResponseSignal.FILE_ID_ERROR.value,
-                    "detail": "No file found with the provided file identifier."
+                    "signal": signal,
+                    "detail": detail
                 }
             )
 
         target_asset_id = asset_record.asset_id
         selected_file = asset_record.asset_name
+        accessible_asset_ids = [asset_record.asset_id]
 
     max_chunks = None
     if summarize_request.max_chunks and summarize_request.max_chunks > 0:
         max_chunks = summarize_request.max_chunks
 
+    if target_asset_id is None:
+        project_assets = await asset_model.get_all_project_assets(
+            asset_project_id=project.project_id,
+            asset_type=AssetTypeEnum.FILE.value,
+            current_user=current_user,
+        )
+        accessible_asset_ids = [record.asset_id for record in project_assets]
+
+    if not accessible_asset_ids:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.NO_FILES_ERROR.value,
+                "detail": "No accessible files are available for summarization."
+            }
+        )
+
     chunks = await chunk_model.get_project_chunks_for_summary(
         project_id=project.project_id,
-        asset_id=target_asset_id,
+        asset_ids=accessible_asset_ids,
         limit=max_chunks
     )
 

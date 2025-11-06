@@ -1,11 +1,13 @@
 from fastapi import FastAPI
-from routes import base, data, nlp
+from routes import base, data, nlp, users
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
+from models.UserModel import UserModel
+from helpers.security import hash_password
 
 app = FastAPI()
 
@@ -42,6 +44,13 @@ async def startup_span():
         default_language=settings.DEFAULT_LANG,
     )
 
+    user_model = await UserModel.create_instance(
+        db_client=app.db_client
+    )
+    await user_model.ensure_initial_admin(
+        username="admin",
+        password_hash=hash_password("admin123"),
+    )
 
 async def shutdown_span():
     app.db_engine.dispose()
@@ -53,3 +62,4 @@ app.on_event("shutdown")(shutdown_span)
 app.include_router(base.base_router)
 app.include_router(data.data_router)
 app.include_router(nlp.nlp_router)
+app.include_router(users.users_router)

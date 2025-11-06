@@ -61,7 +61,7 @@ class CoHereProvider(LLMInterface):
         if not response or not response.text:
             self.logger.error("Error while generating text with CoHere")
             return None
-        
+
         return response.text
     
     def embed_text(self, text: str, document_type: str = None):
@@ -95,3 +95,21 @@ class CoHereProvider(LLMInterface):
             "role": role,
             "text": prompt,
         }
+
+    def generate_text_stream(self, prompt: str, chat_history: list=[], max_output_tokens: int=None,
+                             temperature: float = None, collector: dict=None):
+
+        text = self.generate_text(
+            prompt=prompt,
+            chat_history=list(chat_history) if chat_history else [],
+            max_output_tokens=max_output_tokens,
+            temperature=temperature
+        )
+
+        def generator():
+            if text:
+                if collector is not None:
+                    collector.setdefault("output", []).append(text)
+                yield text
+
+        return generator()

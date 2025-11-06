@@ -1,7 +1,7 @@
 from .BaseController import BaseController
 from models.db_schemes import Project, DataChunk
 from stores.llm.LLMEnums import DocumentTypeEnum
-from typing import List, Optional
+from typing import List, Optional, Dict
 import json
 
 class NLPController(BaseController):
@@ -64,7 +64,8 @@ class NLPController(BaseController):
 
         return True
 
-    def search_vector_db_collection(self, project: Project, text: str, limit: int = 10):
+    def search_vector_db_collection(self, project: Project, text: str, limit: int = 10,
+                                    doc_types: Optional[List[str]] = None):
 
         # step1: get collection name
         collection_name = self.create_collection_name(project_id=project.project_id)
@@ -86,21 +87,43 @@ class NLPController(BaseController):
         if not results:
             return False
 
+        if doc_types:
+            doc_types_normalized = {dt.lower() for dt in doc_types}
+            filtered_results = []
+            for result in results:
+                metadata = getattr(result, "metadata", None)
+                chunk_type = None
+                if isinstance(metadata, dict):
+                    chunk_type = metadata.get("doc_type", metadata.get("document_type"))
+                elif metadata is not None and hasattr(metadata, "get"):
+                    chunk_type = metadata.get("doc_type")
+
+                if chunk_type and chunk_type.lower() in doc_types_normalized:
+                    filtered_results.append(result)
+
+            if filtered_results:
+                return filtered_results
+            return []
+
         return results
     
-    def answer_rag_question(self, project: Project, query: str, limit: int = 10):
+    def answer_rag_question(self, project: Project, query: str, limit: int = 10,
+                            chat_messages: Optional[List[Dict[str, str]]] = None,
+                            stream: bool = False, collector: Optional[dict] = None,
+                            doc_types: Optional[List[str]] = None):
         
-        answer, full_prompt, chat_history = None, None, None
+        answer_or_stream, full_prompt, chat_history = None, None, None
 
         # step1: retrieve related documents
         retrieved_documents = self.search_vector_db_collection(
             project=project,
             text=query,
             limit=limit,
+            doc_types=doc_types,
         )
 
         if not retrieved_documents or len(retrieved_documents) == 0:
-            return answer, full_prompt, chat_history
+            return answer_or_stream, full_prompt, chat_history
         
         # step2: Construct LLM prompt
         system_prompt = self.template_parser.get("rag", "system_prompt")
@@ -125,18 +148,62 @@ class NLPController(BaseController):
             )
         ]
 
+        if chat_messages:
+            trimmed_messages = chat_messages[-5:]
+
+            if len(trimmed_messages) > 2:
+                earlier_messages = trimmed_messages[:-2]
+                prioritized_messages = trimmed_messages[-2:]
+            else:
+                earlier_messages = []
+                prioritized_messages = trimmed_messages
+
+            for message in earlier_messages:
+                chat_history.append(
+                    self.generation_client.construct_prompt(
+                        prompt=self.generation_client.process_text(message.get("prompt", "")),
+                        role=self.generation_client.enums.USER.value,
+                    )
+                )
+                chat_history.append(
+                    self.generation_client.construct_prompt(
+                        prompt=self.generation_client.process_text(message.get("answer", "")),
+                        role=self.generation_client.enums.ASSISTANT.value,
+                    )
+                )
+
+            for message in prioritized_messages:
+                chat_history.append(
+                    self.generation_client.construct_prompt(
+                        prompt=self.generation_client.process_text(message.get("prompt", "")),
+                        role=self.generation_client.enums.USER.value,
+                    )
+                )
+                chat_history.append(
+                    self.generation_client.construct_prompt(
+                        prompt=self.generation_client.process_text(message.get("answer", "")),
+                        role=self.generation_client.enums.ASSISTANT.value,
+                    )
+                )
+
         full_prompt = "\n\n".join([ documents_prompts,  footer_prompt])
 
-        # step4: Retrieve the Answer
-        answer = self.generation_client.generate_text(
-            prompt=full_prompt,
-            chat_history=chat_history
-        )
+        if stream:
+            answer_or_stream = self.generation_client.generate_text_stream(
+                prompt=full_prompt,
+                chat_history=chat_history,
+                collector=collector
+            )
+        else:
+            answer_or_stream = self.generation_client.generate_text(
+                prompt=full_prompt,
+                chat_history=chat_history
+            )
 
-        return answer, full_prompt, chat_history
+        return answer_or_stream, full_prompt, chat_history
     
     def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
-                         max_output_tokens: Optional[int] = 300):
+                         max_output_tokens: Optional[int] = None):
         if not chunks or len(chunks) == 0:
             return None, None
 

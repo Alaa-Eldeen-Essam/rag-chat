@@ -7,6 +7,8 @@ class PushRequest(BaseModel):
 class SearchRequest(BaseModel):
     text: str
     limit: Optional[int] = 5
+    stream: Optional[bool] = False
+    conversation_id: Optional[int] = None
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None
