@@ -1,8 +1,9 @@
-from .BaseController import BaseController
-from models.db_schemes import Project, DataChunk
-from stores.llm.LLMEnums import DocumentTypeEnum
-from typing import List, Optional, Dict
 import json
+from typing import Any, Dict, List, Optional
+
+from .BaseController import BaseController
+from models.db_schemes import DataChunk, Project
+from stores.llm.LLMEnums import DocumentTypeEnum
 
 class NLPController(BaseController):
 
@@ -29,6 +30,70 @@ class NLPController(BaseController):
         return json.loads(
             json.dumps(collection_info, default=lambda x: x.__dict__)
         )
+
+    def _coerce_metadata_dict(self, metadata: Optional[Any]) -> Optional[Dict[str, Any]]:
+        if isinstance(metadata, dict):
+            return metadata
+        if metadata is None:
+            return None
+
+        if hasattr(metadata, "dict"):
+            try:
+                meta_dict = metadata.dict()  # type: ignore[call-arg]
+                if isinstance(meta_dict, dict):
+                    return meta_dict
+            except Exception:
+                pass
+
+        if hasattr(metadata, "__dict__"):
+            meta_dict = getattr(metadata, "__dict__", None)
+            if isinstance(meta_dict, dict):
+                return meta_dict
+
+        return None
+
+    def _normalize_label_value(self, value: str) -> str:
+        label = (value or "").strip()
+        if not label:
+            return ""
+        normalized = label.replace("\\", "/")
+        if "/" in normalized:
+            normalized = normalized.split("/")[-1]
+        return normalized
+
+    def _resolve_document_label(
+        self,
+        metadata: Optional[Any],
+        fallback_label: str,
+        asset_labels: Optional[Dict[int, str]] = None,
+        asset_labels_by_name: Optional[Dict[str, str]] = None,
+        asset_id_hint: Optional[int] = None,
+    ) -> str:
+        metadata_dict = self._coerce_metadata_dict(metadata)
+
+        candidate_asset_id = asset_id_hint
+        if candidate_asset_id is None and metadata_dict:
+            candidate_asset_id = metadata_dict.get("asset_id")
+
+        if asset_labels and candidate_asset_id is not None:
+            try:
+                label = asset_labels.get(int(candidate_asset_id))
+            except (ValueError, TypeError):
+                label = None
+            if label:
+                return self._normalize_label_value(label)
+
+        if metadata_dict:
+            for key in ("source_name", "original_filename", "original_name", "filename", "name", "source"):
+                value = metadata_dict.get(key)
+                if isinstance(value, str):
+                    cleaned = self._normalize_label_value(value)
+                    if cleaned:
+                        if asset_labels_by_name and cleaned in asset_labels_by_name:
+                            return asset_labels_by_name[cleaned]
+                        return cleaned
+
+        return self._normalize_label_value(fallback_label)
     
     def index_into_vector_db(self, project: Project, chunks: List[DataChunk],
                                    chunks_ids: List[int], 
@@ -135,7 +200,9 @@ class NLPController(BaseController):
                             chat_messages: Optional[List[Dict[str, str]]] = None,
                             stream: bool = False, collector: Optional[dict] = None,
                             doc_types: Optional[List[str]] = None,
-                            asset_ids: Optional[List[int]] = None):
+                            asset_ids: Optional[List[int]] = None,
+                            asset_labels: Optional[Dict[int, str]] = None,
+                            asset_labels_by_name: Optional[Dict[str, str]] = None):
         
         answer_or_stream, full_prompt, chat_history = None, None, None
 
@@ -154,13 +221,22 @@ class NLPController(BaseController):
         # step2: Construct LLM prompt
         system_prompt = self.template_parser.get("rag", "system_prompt")
 
-        documents_prompts = "\n".join([
-            self.template_parser.get("rag", "document_prompt", {
-                    "doc_num": idx + 1,
-                    "chunk_text": self.generation_client.process_text(doc.text),
-            })
-            for idx, doc in enumerate(retrieved_documents)
-        ])
+        document_sections = []
+        for idx, doc in enumerate(retrieved_documents):
+            chunk_text = self.generation_client.process_text(doc.text)
+            doc_label = self._resolve_document_label(
+                getattr(doc, "metadata", None),
+                fallback_label=f"Document {idx + 1}",
+                asset_labels=asset_labels,
+                asset_labels_by_name=asset_labels_by_name,
+            )
+            section = self.template_parser.get("rag", "document_prompt", {
+                    "doc_label": doc_label,
+                    "chunk_text": chunk_text,
+            }) or f"## Document: {doc_label}\n### Content: {chunk_text}"
+            document_sections.append(section)
+
+        documents_prompts = "\n".join(document_sections)
 
         footer_prompt = self.template_parser.get("rag", "footer_prompt", {
             "query": query
@@ -229,7 +305,9 @@ class NLPController(BaseController):
         return answer_or_stream, full_prompt, chat_history
     
     def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
-                         max_output_tokens: Optional[int] = None):
+                         max_output_tokens: Optional[int] = None,
+                         asset_labels: Optional[Dict[int, str]] = None,
+                         asset_labels_by_name: Optional[Dict[str, str]] = None):
         if not chunks or len(chunks) == 0:
             return None, None
 
@@ -237,13 +315,24 @@ class NLPController(BaseController):
             "You are an assistant that condenses provided content into a clear, concise summary."
         )
 
-        documents_prompts = "\n".join([
-            self.template_parser.get("summary", "document_prompt", {
-                "doc_num": chunk.chunk_order if chunk.chunk_order else idx + 1,
-                "chunk_text": self.generation_client.process_text(chunk.chunk_text),
-            }) or f"## Document {chunk.chunk_order if chunk.chunk_order else idx + 1}\n{self.generation_client.process_text(chunk.chunk_text)}"
-            for idx, chunk in enumerate(chunks)
-        ])
+        document_sections = []
+        for idx, chunk in enumerate(chunks):
+            chunk_text = self.generation_client.process_text(chunk.chunk_text)
+            fallback_label = f"Document {chunk.chunk_order if chunk.chunk_order else idx + 1}"
+            doc_label = self._resolve_document_label(
+                getattr(chunk, "chunk_metadata", None),
+                fallback_label=fallback_label,
+                asset_labels=asset_labels,
+                asset_labels_by_name=asset_labels_by_name,
+                asset_id_hint=getattr(chunk, "chunk_asset_id", None),
+            )
+            section = self.template_parser.get("summary", "document_prompt", {
+                "doc_label": doc_label,
+                "chunk_text": chunk_text,
+            }) or f"## Document: {doc_label}\n{chunk_text}"
+            document_sections.append(section)
+
+        documents_prompts = "\n".join(document_sections)
 
         default_focus = self.template_parser.get("summary", "default_focus") or "Provide a concise summary that highlights the key ideas and critical details."
 

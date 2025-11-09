@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, status, Request, Form
 from fastapi.responses import JSONResponse
 import os
 from helpers.config import get_settings, Settings
+from helpers.assets import get_asset_display_name
 from controllers import DataController, ProjectController, ProcessController
 import aiofiles
 from models import ResponseSignal
@@ -185,10 +186,12 @@ async def process_endpoint(
                 }
             )
 
+        original_name = get_asset_display_name(asset_record) or asset_record.asset_name
         project_files_info = {
             asset_record.asset_id: {
                 "name": asset_record.asset_name,
                 "doc_type": asset_record.asset_document_type or DOCUMENT_TYPE_DEFAULT,
+                "original_name": original_name,
             }
         }
     
@@ -203,6 +206,7 @@ async def process_endpoint(
             record.asset_id: {
                 "name": record.asset_name,
                 "doc_type": record.asset_document_type or DOCUMENT_TYPE_DEFAULT,
+                "original_name": get_asset_display_name(record) or record.asset_name,
             }
             for record in project_files
         }
@@ -255,6 +259,8 @@ async def process_endpoint(
                 }
             )
 
+        original_name = file_info.get("original_name") or file_id
+
         file_chunks_records = [
             DataChunk(
                 chunk_text=chunk.page_content,
@@ -262,6 +268,8 @@ async def process_endpoint(
                     **(chunk.metadata or {}),
                     "doc_type": document_type,
                     "asset_id": asset_id,
+                    "source_name": original_name,
+                    "original_filename": original_name,
                 },
                 chunk_order=i+1,
                 chunk_project_id=project.project_id,
@@ -320,9 +328,7 @@ async def list_assets(
 
     payload = []
     for asset in assets:
-        original_name = None
-        if asset.asset_config and isinstance(asset.asset_config, dict):
-            original_name = asset.asset_config.get("original_filename")
+        original_name = get_asset_display_name(asset)
 
         payload.append(
             {

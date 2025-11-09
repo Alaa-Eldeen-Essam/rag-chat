@@ -18,7 +18,7 @@ system_prompt = Template("\n".join([
 #### Document ####
 document_prompt = Template(
     "\n".join([
-        "## Document No: $doc_num",
+        "## Document: $doc_label",
         "### Content: $chunk_text",
     ])
 )

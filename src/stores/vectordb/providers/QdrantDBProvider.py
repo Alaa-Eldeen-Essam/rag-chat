@@ -137,10 +137,27 @@ class QdrantDBProvider(VectorDBInterface):
         if not results or len(results) == 0:
             return None
         
-        return [
-            RetrievedDocument(**{
-                "score": result.score,
-                "text": result.payload["text"],
-            })
-            for result in results
-        ]
+        documents = []
+        for result in results:
+            payload = result.payload or {}
+            metadata = payload.get("metadata") if isinstance(payload, dict) else None
+
+            text_value = None
+            if isinstance(payload, dict):
+                text_value = payload.get("text")
+
+            if text_value is None and hasattr(result.payload, "get"):
+                text_value = result.payload.get("text")  # type: ignore[attr-defined]
+
+            if text_value is None:
+                text_value = ""
+
+            documents.append(
+                RetrievedDocument(
+                    score=result.score,
+                    text=text_value,
+                    metadata=metadata,
+                )
+            )
+
+        return documents

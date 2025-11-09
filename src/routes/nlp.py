@@ -10,6 +10,7 @@ from models.ChatHistoryModel import ChatHistoryModel, MAX_CONVERSATION_MESSAGES
 from models.ChatConversationModel import ChatConversationModel
 from models.db_schemes import User, Asset
 from routes.dependencies import get_current_user
+from helpers.assets import get_asset_display_name
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from sqlalchemy import select
 
@@ -383,6 +384,22 @@ async def answer_rag(
             }
         )
 
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    project_assets = await asset_model.get_all_project_assets(
+        asset_project_id=project.project_id,
+        asset_type=AssetTypeEnum.FILE.value,
+        current_user=current_user,
+    )
+    asset_label_lookup = {}
+    asset_label_lookup_by_name = {}
+    for asset in project_assets:
+        display_name = get_asset_display_name(asset) or asset.asset_name
+        asset_label_lookup[asset.asset_id] = display_name
+        asset_label_lookup_by_name[asset.asset_name] = display_name
+
     generation_clients = getattr(request.app, "generation_clients", {})
     generation_models = getattr(request.app, "generation_model_ids", {})
     default_model_key = getattr(request.app, "default_generation_model_key", None)
@@ -454,6 +471,8 @@ async def answer_rag(
         collector=collector,
         doc_types=doc_type_filter if doc_type_filter else None,
         asset_ids=[asset_filter] if asset_filter else None,
+        asset_labels=asset_label_lookup if asset_label_lookup else None,
+        asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
     )
 
     if full_prompt is None or chat_history is None:
@@ -627,6 +646,8 @@ async def summarize_project(
     target_asset_id = None
     selected_file = None
     accessible_asset_ids = []
+    asset_label_lookup = {}
+    asset_label_lookup_by_name = {}
 
     if summarize_request.file_id:
         asset_record, record_exists = await asset_model.get_asset_record(
@@ -650,6 +671,9 @@ async def summarize_project(
         target_asset_id = asset_record.asset_id
         selected_file = asset_record.asset_name
         accessible_asset_ids = [asset_record.asset_id]
+        display_name = get_asset_display_name(asset_record) or asset_record.asset_name
+        asset_label_lookup[asset_record.asset_id] = display_name
+        asset_label_lookup_by_name[asset_record.asset_name] = display_name
 
     max_chunks = None
     if summarize_request.max_chunks and summarize_request.max_chunks > 0:
@@ -661,7 +685,12 @@ async def summarize_project(
             asset_type=AssetTypeEnum.FILE.value,
             current_user=current_user,
         )
-        accessible_asset_ids = [record.asset_id for record in project_assets]
+        accessible_asset_ids = []
+        for record in project_assets:
+            accessible_asset_ids.append(record.asset_id)
+            display_name = get_asset_display_name(record) or record.asset_name
+            asset_label_lookup[record.asset_id] = display_name
+            asset_label_lookup_by_name[record.asset_name] = display_name
 
     if not accessible_asset_ids:
         return JSONResponse(
@@ -697,7 +726,9 @@ async def summarize_project(
     summary, full_prompt = nlp_controller.summarize_chunks(
         chunks=chunks,
         focus=summarize_request.focus,
-        max_output_tokens=summarize_request.max_output_tokens
+        max_output_tokens=summarize_request.max_output_tokens,
+        asset_labels=asset_label_lookup if asset_label_lookup else None,
+        asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
     )
 
     if not summary:

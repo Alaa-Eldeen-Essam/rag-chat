@@ -4,6 +4,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy import Index
 from pydantic import BaseModel
+from typing import Optional, Dict, Any
 import uuid
 
 class DataChunk(SQLAlchemyBase):
@@ -34,3 +35,4 @@ class DataChunk(SQLAlchemyBase):
 class RetrievedDocument(BaseModel):
     text: str
     score: float
+    metadata: Optional[Dict[str, Any]] = None
