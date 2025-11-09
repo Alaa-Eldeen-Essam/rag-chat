@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     INPUT_DAFAULT_MAX_CHARACTERS: int = None
     GENERATION_DAFAULT_MAX_TOKENS: int = None
     GENERATION_DAFAULT_TEMPERATURE: float = None
+    SUMMARY_DEFAULT_MAX_TOKENS: int = None
     
     VECTOR_DB_BACKEND_LITERAL: List[str] = None
     VECTOR_DB_BACKEND : str

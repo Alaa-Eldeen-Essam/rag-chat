@@ -12,6 +12,7 @@ from models.ChatConversationModel import ChatConversationModel
 from models.db_schemes import User, Asset
 from routes.dependencies import get_current_user
 from helpers.assets import get_asset_display_name
+from helpers.config import get_settings, Settings
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from sqlalchemy import select
 from tqdm.auto import tqdm
@@ -114,7 +115,7 @@ async def index_project(
 
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
+        generation_client=generation_client,
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
     )
@@ -669,6 +670,7 @@ async def summarize_project(
     project_id: int,
     summarize_request: SummarizeRequest,
     current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
 ):
 
     project_model = await ProjectModel.create_instance(
@@ -682,6 +684,36 @@ async def summarize_project(
     asset_model = await AssetModel.create_instance(
         db_client=request.app.db_client
     )
+
+    generation_clients = getattr(request.app, "generation_clients", {})
+    generation_models = getattr(request.app, "generation_model_ids", {})
+    default_model_key = getattr(request.app, "default_generation_model_key", None)
+    default_generation_client = getattr(request.app, "generation_client", None)
+
+    requested_model_key = (summarize_request.model or default_model_key or "best").lower()
+    selected_generation_client = generation_clients.get(requested_model_key)
+
+    if not selected_generation_client and summarize_request.model:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "detail": f"Unknown model '{summarize_request.model}'."
+            }
+        )
+
+    generation_client = selected_generation_client or default_generation_client
+    if generation_client is None:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "detail": "Generation backend is not configured."
+            }
+        )
+
+    model_key_used = requested_model_key if selected_generation_client else (default_model_key or "best")
+    model_id_used = generation_models.get(model_key_used)
 
     project, status_code = await project_model.get_project_or_create_one(
         project_id=project_id,
@@ -780,15 +812,100 @@ async def summarize_project(
         template_parser=request.app.template_parser,
     )
 
-    summary, full_prompt = nlp_controller.summarize_chunks(
-        chunks=chunks,
-        focus=summarize_request.focus,
-        max_output_tokens=summarize_request.max_output_tokens,
-        asset_labels=asset_label_lookup if asset_label_lookup else None,
-        asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+    summary_max_tokens = (
+        summarize_request.max_output_tokens
+        or app_settings.SUMMARY_DEFAULT_MAX_TOKENS
+        or app_settings.GENERATION_DAFAULT_MAX_TOKENS
     )
 
-    if not summary:
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    chunk_ids = [chunk.chunk_id for chunk in chunks if getattr(chunk, "chunk_id", None) is not None]
+    stream_enabled = summarize_request.stream if summarize_request.stream is not None else True
+
+    collector = {"output": [], "reasoning": []} if stream_enabled else None
+
+    summary_output, full_prompt = nlp_controller.summarize_chunks(
+        chunks=chunks,
+        focus=summarize_request.focus,
+        max_output_tokens=summary_max_tokens,
+        asset_labels=asset_label_lookup if asset_label_lookup else None,
+        asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+        stream=stream_enabled,
+        collector=collector,
+    )
+
+    if stream_enabled:
+        if summary_output is None:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.SUMMARY_GENERATION_ERROR.value,
+                    "detail": "Unable to start streaming summary response.",
+                },
+            )
+
+        async def summary_event_stream():
+            try:
+                yield json.dumps({
+                    "signal": ResponseSignal.SUMMARY_STREAM_START.value,
+                    "file_id": selected_file,
+                    "focus": summarize_request.focus,
+                    "max_output_tokens": summary_max_tokens,
+                    "used_chunks": len(chunks),
+                    "model": model_key_used,
+                    "model_id": model_id_used,
+                }) + "\n"
+
+                for chunk in summary_output:
+                    if chunk:
+                        yield json.dumps({
+                            "signal": ResponseSignal.SUMMARY_STREAM_DELTA.value,
+                            "delta": chunk,
+                        }) + "\n"
+            finally:
+                final_summary = "".join(collector.get("output", [])) if collector else ""
+                final_summary = final_summary.strip()
+                signal_value = ResponseSignal.SUMMARY_GENERATION_SUCCESS.value if final_summary else ResponseSignal.SUMMARY_GENERATION_ERROR.value
+
+                if final_summary:
+                    await summary_model.create_summary(
+                        user_id=current_user.id,
+                        project_id=project.project_id,
+                        asset_id=target_asset_id,
+                        summary_text=final_summary,
+                        request_payload={
+                            "file_id": summarize_request.file_id,
+                            "max_chunks": summarize_request.max_chunks,
+                            "focus": summarize_request.focus,
+                            "requested_max_output_tokens": summarize_request.max_output_tokens,
+                            "max_output_tokens_used": summary_max_tokens,
+                            "model": model_key_used,
+                        },
+                        chunk_ids=chunk_ids,
+                        chunk_count=len(chunks),
+                        prompt_text=full_prompt,
+                        max_output_tokens=summary_max_tokens,
+                    )
+
+                payload = {
+                    "signal": signal_value,
+                    "summary": final_summary,
+                    "used_chunks": len(chunks),
+                    "file_id": selected_file,
+                    "focus": summarize_request.focus,
+                    "max_output_tokens": summary_max_tokens,
+                    "full_prompt": full_prompt,
+                    "model": model_key_used,
+                    "model_id": model_id_used,
+                }
+                yield json.dumps(payload) + "\n"
+
+        return StreamingResponse(summary_event_stream(), media_type="application/json")
+
+    if not summary_output:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
@@ -797,11 +914,7 @@ async def summarize_project(
             }
         )
 
-    summary_model = await SummaryModel.create_instance(
-        db_client=request.app.db_client
-    )
-
-    chunk_ids = [chunk.chunk_id for chunk in chunks if getattr(chunk, "chunk_id", None) is not None]
+    summary = summary_output
 
     await summary_model.create_summary(
         user_id=current_user.id,
@@ -812,12 +925,14 @@ async def summarize_project(
             "file_id": summarize_request.file_id,
             "max_chunks": summarize_request.max_chunks,
             "focus": summarize_request.focus,
-            "max_output_tokens": summarize_request.max_output_tokens,
+            "requested_max_output_tokens": summarize_request.max_output_tokens,
+            "max_output_tokens_used": summary_max_tokens,
+            "model": model_key_used,
         },
         chunk_ids=chunk_ids,
         chunk_count=len(chunks),
         prompt_text=full_prompt,
-        max_output_tokens=summarize_request.max_output_tokens,
+        max_output_tokens=summary_max_tokens,
     )
 
     return JSONResponse(
@@ -827,7 +942,9 @@ async def summarize_project(
             "used_chunks": len(chunks),
             "file_id": selected_file,
             "focus": summarize_request.focus,
-            "max_output_tokens": summarize_request.max_output_tokens,
+            "max_output_tokens": summary_max_tokens,
             "full_prompt": full_prompt,
+            "model": model_key_used,
+            "model_id": model_id_used,
         }
     )

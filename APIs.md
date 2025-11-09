@@ -186,10 +186,10 @@ Authorization: Basic base64("username:password")
   "conversation_id": 3,
   "model": "best",
   "asset_id": 12,
-  "stream": false
+  "stream": true
 }
 ```
-- **Description:** Runs full RAG pipeline (retrieval → LLM). Automatically stores the conversation history.
+- **Description:** Runs the full RAG pipeline (retrieval → LLM). **Streaming is enabled by default**; include `"stream": false` if you need the legacy blocking response. Automatically stores the conversation history.
 - **Response (non-streaming):**
 ```json
 {
@@ -202,20 +202,22 @@ Authorization: Basic base64("username:password")
   "full_prompt": "## Document: AlaaEldeen (1).pdf..."
 }
 ```
-- **Streaming mode:** When `stream=true`, the endpoint returns an `text/event-stream` with `rag_answer_stream_start` and incremental deltas, then persists history when the generator finishes.
+- **Streaming mode:** When streaming, the endpoint returns `text/event-stream` chunks (`rag_answer_stream_start`, repeated `rag_answer_stream_delta`, followed by `rag_answer_success`/`rag_answer_error`) and persists history after the final chunk.
 
 ### POST `/summary/{project_id}`
 - **Body (`SummarizeRequest`):**
 ```json
 {
   "file_id": "uw8fanbg0a1a_AlaaEldeen1.pdf",
-  "max_chunks": 20,
+  "max_chunks": 0,
+  "model": "fast",
   "focus": "Highlight key decisions",
-  "max_output_tokens": 512
+  "max_output_tokens": 512,
+  "stream": true
 }
 ```
-- **Description:** Fetches processed chunks (optionally filtered by file) and calls the generation backend to summarize them.
-- **Response:** `summary_generation_success` plus the summary text, number of chunks used, and the rendered prompt.
+- **Description:** Fetches processed chunks (optionally filtered by file) and streams the summary tokens in real time by default (events: `summary_stream_start`, multiple `summary_stream_delta`, and a final `summary_generation_success`). You may also pass `"model": "best" | "fast" | "thinking"` to target a specific Ollama client. Send `"stream": false` to receive a single JSON response instead.
+- **Final Response:** Whether streamed or blocking, the last payload includes `summary_generation_success`, the full summary text, chunks used, and the rendered prompt.
 
 ### Conversations & Metadata
 

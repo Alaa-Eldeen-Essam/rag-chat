@@ -320,7 +320,9 @@ class NLPController(BaseController):
     def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
                          max_output_tokens: Optional[int] = None,
                          asset_labels: Optional[Dict[int, str]] = None,
-                         asset_labels_by_name: Optional[Dict[str, str]] = None):
+                         asset_labels_by_name: Optional[Dict[str, str]] = None,
+                         stream: bool = False,
+                         collector: Optional[Dict[str, list]] = None):
         if not chunks or len(chunks) == 0:
             return None, None
 
@@ -365,6 +367,15 @@ class NLPController(BaseController):
                 role=self.generation_client.enums.SYSTEM.value,
             )
         ]
+
+        if stream:
+            summary_stream = self.generation_client.generate_text_stream(
+                prompt=summary_prompt,
+                chat_history=chat_history,
+                max_output_tokens=max_output_tokens,
+                collector=collector,
+            )
+            return summary_stream, summary_prompt
 
         summary = self.generation_client.generate_text(
             prompt=summary_prompt,
