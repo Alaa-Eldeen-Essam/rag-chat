@@ -2,6 +2,7 @@ from ..LLMInterface import LLMInterface
 from ..LLMEnums import CoHereEnums, DocumentTypeEnum
 import cohere
 import logging
+from typing import List, Union
 
 class CoHereProvider(LLMInterface):
 
@@ -61,13 +62,15 @@ class CoHereProvider(LLMInterface):
         if not response or not response.text:
             self.logger.error("Error while generating text with CoHere")
             return None
-        
+
         return response.text
     
-    def embed_text(self, text: str, document_type: str = None):
+    def embed_text(self, text: Union[str, List[str]], document_type: str = None):
         if not self.client:
             self.logger.error("CoHere client was not set")
             return None
+        if isinstance(text, str):
+            text = [text]
         
         if not self.embedding_model_id:
             self.logger.error("Embedding model for CoHere was not set")
@@ -79,7 +82,7 @@ class CoHereProvider(LLMInterface):
 
         response = self.client.embed(
             model = self.embedding_model_id,
-            texts = [self.process_text(text)],
+            texts = [ self.process_text(t) for t in text ],
             input_type = input_type,
             embedding_types=['float'],
         )
@@ -88,10 +91,28 @@ class CoHereProvider(LLMInterface):
             self.logger.error("Error while embedding text with CoHere")
             return None
         
-        return response.embeddings.float[0]
+        return [ f for f in response.embeddings.float ]
     
     def construct_prompt(self, prompt: str, role: str):
         return {
             "role": role,
             "text": prompt,
         }
+
+    def generate_text_stream(self, prompt: str, chat_history: list=[], max_output_tokens: int=None,
+                             temperature: float = None, collector: dict=None):
+
+        text = self.generate_text(
+            prompt=prompt,
+            chat_history=list(chat_history) if chat_history else [],
+            max_output_tokens=max_output_tokens,
+            temperature=temperature
+        )
+
+        def generator():
+            if text:
+                if collector is not None:
+                    collector.setdefault("output", []).append(text)
+                yield text
+
+        return generator()
