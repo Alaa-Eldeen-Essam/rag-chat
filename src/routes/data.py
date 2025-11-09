@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import os
 from helpers.config import get_settings, Settings
 from helpers.assets import get_asset_display_name
-from controllers import DataController, ProjectController, ProcessController
+from controllers import DataController, ProjectController, ProcessController, NLPController
 import aiofiles
 from models import ResponseSignal
 import logging
@@ -393,6 +393,20 @@ async def delete_asset(
     chunk_model = await ChunkModel.create_instance(
         db_client=request.app.db_client
     )
+
+    chunk_ids = await chunk_model.get_chunk_ids_by_asset_ids([asset_record.asset_id])
+
+    if chunk_ids:
+        nlp_controller = NLPController(
+            vectordb_client=request.app.vectordb_client,
+            generation_client=request.app.generation_client,
+            embedding_client=request.app.embedding_client,
+            template_parser=request.app.template_parser,
+        )
+        collection_name = nlp_controller.create_collection_name(
+            project_id=asset_record.asset_project_id
+        )
+        await request.app.vectordb_client.delete_records(collection_name, chunk_ids)
 
     await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
     await asset_model.delete_asset(asset_record)

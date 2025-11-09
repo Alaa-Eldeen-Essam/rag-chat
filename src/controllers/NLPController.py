@@ -1,9 +1,12 @@
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from .BaseController import BaseController
 from models.db_schemes import DataChunk, Project
 from stores.llm.LLMEnums import DocumentTypeEnum
+
+logger = logging.getLogger(__name__)
 
 class NLPController(BaseController):
 
@@ -103,10 +106,16 @@ class NLPController(BaseController):
         collection_name = self.create_collection_name(project_id=project.project_id)
 
         # step2: manage items
-        texts = [ c.chunk_text for c in chunks ]
-        metadata = [ c.chunk_metadata for c in  chunks]
-        vectors = self.embedding_client.embed_text(text=texts, 
-                                                  document_type=DocumentTypeEnum.DOCUMENT.value)
+        texts = [c.chunk_text for c in chunks]
+        metadata = [c.chunk_metadata for c in chunks]
+        vectors = self.embedding_client.embed_text(
+            text=texts,
+            document_type=DocumentTypeEnum.DOCUMENT.value,
+        )
+
+        if not vectors or len(vectors) != len(texts):
+            logger.error("Embedding client returned invalid vectors for indexing")
+            return False
 
         # step3: create collection if not exists
         _ = await self.vectordb_client.create_collection(
@@ -148,7 +157,7 @@ class NLPController(BaseController):
             return False  
 
         # step3: do semantic search
-        results = self.vectordb_client.search_by_vector(
+        results = await self.vectordb_client.search_by_vector(
             collection_name=collection_name,
             vector=query_vector,
             limit=limit
