@@ -188,6 +188,24 @@ class QdrantDBProvider(VectorDBInterface):
                 points_selector=models.PointIdsList(points=record_ids),
             )
         except Exception as exc:
+            self.logger.error("Failed to delete points from %s: %s", collection_name, exc)
+            return False
+
+        return True
+
+    async def delete_records(self, collection_name: str, record_ids: List[int]) -> bool:
+        if not record_ids:
+            return True
+
+        if not await self.is_collection_existed(collection_name):
+            return False
+
+        try:
+            self.client.delete(
+                collection_name=collection_name,
+                points_selector=models.PointIdsList(points=record_ids),
+            )
+        except Exception as exc:
             self.logger.error("Failed to delete records from %s: %s", collection_name, exc)
             return False
 

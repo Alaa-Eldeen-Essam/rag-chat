@@ -5,3 +5,4 @@ from .datachunk import DataChunk, RetrievedDocument
 from .user import User
 from .chat_history import ChatHistory
 from .conversation import ChatConversation
+from .summary import SummaryRecord

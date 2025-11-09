@@ -21,6 +21,7 @@ class Project(SQLAlchemyBase):
     chunks = relationship("DataChunk", back_populates="project")
     assets = relationship("Asset", back_populates="project")
     user = relationship("User", back_populates="projects")
+    summaries = relationship("SummaryRecord", back_populates="project")
 
     __table_args__ = (
         Index('ix_project_user_id', project_user_id),

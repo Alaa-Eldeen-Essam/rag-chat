@@ -3,6 +3,7 @@ from typing import Optional
 
 class PushRequest(BaseModel):
     do_reset: Optional[int] = 0
+    asset_name: Optional[str] = None
 
 class SearchRequest(BaseModel):
     text: str

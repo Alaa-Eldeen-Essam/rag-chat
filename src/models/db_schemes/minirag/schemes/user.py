@@ -19,6 +19,7 @@ class User(SQLAlchemyBase):
     assets = relationship("Asset", back_populates="user")
     chat_history = relationship("ChatHistory", back_populates="user")
     conversations = relationship("ChatConversation", back_populates="user")
+    summaries = relationship("SummaryRecord", back_populates="user")
 
     __table_args__ = (
         Index('ix_users_is_admin', is_admin),

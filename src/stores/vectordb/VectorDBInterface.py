@@ -53,4 +53,8 @@ class VectorDBInterface(ABC):
     @abstractmethod
     async def delete_records(self, collection_name: str, record_ids: List[int]) -> bool:
         pass
+
+    @abstractmethod
+    async def delete_records(self, collection_name: str, record_ids: List[int]) -> bool:
+        pass
     

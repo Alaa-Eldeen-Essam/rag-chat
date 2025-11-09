@@ -126,6 +126,28 @@ Authorization: Basic base64("username:password")
   - `404 file_id_error` if the asset does not exist.
   - `403 access_forbidden` if the asset belongs to another private project.
 
+### POST `/upload/process/index/{project_id}`
+- **Auth:** Basic
+- **Body:** `multipart/form-data`
+  - `file` (required): same formats as `/upload`.
+  - `chunk_size` (int, default `100`)
+  - `overlap_size` (int, default `20`)
+  - `do_reset` (int, default `0`) – when `1`, drops and recreates the project’s vector collection before indexing the new chunks.
+  - `is_private` (bool, default `true`), `doc_type` (string)
+- **Description:** Convenience endpoint that uploads a file, processes it into chunks, stores those chunks in Postgres, and immediately indexes them into the configured vector DB (pgvector or Qdrant). If vector indexing fails, it rolls back the asset/chunks and returns an error signal.
+- **Success response:**
+```json
+{
+  "signal": "insert_into_vectordb_success",
+  "asset_id": 42,
+  "stored_file_name": "uw8fanbg0a1a_AlaaEldeen1.pdf",
+  "original_file_name": "Alaa Eldeen (1).pdf",
+  "chunks_created": 14,
+  "indexed_chunks": 14,
+  "collection_name": "collection_1024_1"
+}
+```
+
 ---
 
 ## NLP & Retrieval Routes (`/api/v1/nlp`)
@@ -135,10 +157,11 @@ Authorization: Basic base64("username:password")
 - **Body:**
 ```json
 {
-  "do_reset": 0
+  "do_reset": 0,
+  "asset_name": "uw8fanbg0a1a_AlaaEldeen1.pdf"
 }
 ```
-- **Description:** Streams processed chunks into the configured vector DB (Qdrant). When `do_reset=1`, deletes and recreates the collection.
+- **Description:** Streams processed chunks into the configured vector DB (pgvector/Qdrant). When `asset_name` is provided, only that stored file is indexed; otherwise the entire project is re-indexed. Setting `do_reset=1` drops and recreates the collection before inserting (use with care if you’re targeting a single file).
 - **Response:** `insert_into_vectordb_success` plus `inserted_items_count`.
 
 ### GET `/index/info/{project_id}`

@@ -14,7 +14,6 @@ from models.AssetModel import AssetModel
 from models.db_schemes import DataChunk, Asset, User
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from routes.dependencies import get_current_user
-from controllers import NLPController
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -128,6 +127,195 @@ async def upload_data(
                 "doc_type": asset_record.asset_document_type,
             }
         )
+
+@data_router.post("/upload/process/index/{project_id}")
+async def upload_process_index(
+    request: Request,
+    project_id: int,
+    file: UploadFile,
+    chunk_size: int = Form(100),
+    overlap_size: int = Form(20),
+    do_reset: int = Form(0),
+    is_private: bool = Form(True),
+    doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
+    current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
+):
+
+    project_model = await ProjectModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=True,
+        is_private=is_private,
+        require_owner=True,
+    )
+
+    if project is None:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
+
+    data_controller = DataController()
+    is_valid, result_signal = data_controller.validate_uploaded_file(file=file)
+
+    if not is_valid:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": result_signal
+            }
+        )
+
+    _ = ProjectController().get_project_path(project_id=project_id)
+    file_path, file_id = data_controller.generate_unique_filepath(
+        orig_file_name=file.filename,
+        project_id=project_id
+    )
+
+    try:
+        async with aiofiles.open(file_path, "wb") as f:
+            while chunk := await file.read(app_settings.FILE_DEFAULT_CHUNK_SIZE):
+                await f.write(chunk)
+    except Exception as exc:
+        logger.error("Error while uploading file: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.FILE_UPLOAD_FAILED.value
+            }
+        )
+
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+    chunk_model = await ChunkModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    normalized_doc_type = normalize_document_type(doc_type)
+    asset_resource = Asset(
+        asset_project_id=project.project_id,
+        asset_user_id=current_user.id,
+        asset_type=AssetTypeEnum.FILE.value,
+        asset_name=file_id,
+        asset_size=os.path.getsize(file_path),
+        asset_is_private=is_private,
+        asset_document_type=normalized_doc_type,
+        asset_config={
+            "original_filename": file.filename
+        },
+    )
+    asset_record = await asset_model.create_asset(asset=asset_resource)
+
+    process_controller = ProcessController(project_id=project_id)
+    file_content = process_controller.get_file_content(file_id=file_id)
+
+    if file_content is None:
+        logger.error("Error while processing uploaded file: %s", file_id)
+        await asset_model.delete_asset(asset_record)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.PROCESSING_FAILED.value
+            }
+        )
+
+    file_chunks = process_controller.process_file_content(
+        file_content=file_content,
+        file_id=file_id,
+        chunk_size=chunk_size,
+        overlap_size=overlap_size
+    )
+
+    if not file_chunks:
+        await asset_model.delete_asset(asset_record)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.PROCESSING_FAILED.value
+            }
+        )
+
+    existing_chunk_ids = set(await chunk_model.get_chunk_ids_by_asset_ids([asset_record.asset_id]))
+
+    file_chunks_records = [
+        DataChunk(
+            chunk_text=chunk.page_content,
+            chunk_metadata={
+                **(chunk.metadata or {}),
+                "doc_type": normalized_doc_type,
+                "asset_id": asset_record.asset_id,
+                "source_name": file.filename,
+                "original_filename": file.filename,
+            },
+            chunk_order=i + 1,
+            chunk_project_id=project.project_id,
+            chunk_asset_id=asset_record.asset_id,
+        )
+        for i, chunk in enumerate(file_chunks)
+    ]
+
+    await chunk_model.insert_many_chunks(file_chunks_records)
+
+    updated_chunk_ids = set(await chunk_model.get_chunk_ids_by_asset_ids([asset_record.asset_id]))
+    new_chunk_ids = sorted(updated_chunk_ids - existing_chunk_ids)
+    new_chunks = await chunk_model.get_chunks_by_ids(new_chunk_ids)
+
+    nlp_controller = NLPController(
+        vectordb_client=request.app.vectordb_client,
+        generation_client=request.app.generation_client,
+        embedding_client=request.app.embedding_client,
+        template_parser=request.app.template_parser,
+    )
+
+    indexed = await nlp_controller.index_into_vector_db(
+        project=project,
+        chunks=new_chunks,
+        chunks_ids=new_chunk_ids,
+        do_reset=bool(do_reset),
+    )
+
+    if not indexed:
+        await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+        await asset_model.delete_asset(asset_record)
+        await request.app.vectordb_client.delete_records(
+            nlp_controller.create_collection_name(project.project_id),
+            new_chunk_ids,
+        )
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "signal": ResponseSignal.INSERT_INTO_VECTORDB_ERROR.value,
+                "detail": "Failed to index chunks into the vector database.",
+            },
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.INSERT_INTO_VECTORDB_SUCCESS.value,
+            "asset_id": asset_record.asset_id,
+            "stored_file_name": asset_record.asset_name,
+            "original_file_name": file.filename,
+            "chunks_created": len(new_chunk_ids),
+            "indexed_chunks": len(new_chunk_ids),
+            "collection_name": nlp_controller.create_collection_name(project.project_id),
+        }
+    )
 
 @data_router.post("/process/{project_id}")
 async def process_endpoint(

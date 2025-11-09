@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
+from models.SummaryModel import SummaryModel
 from controllers import NLPController
 from models import ResponseSignal
 from models.AssetModel import AssetModel
@@ -69,6 +70,10 @@ async def index_project(
     chunk_model = await ChunkModel.create_instance(
         db_client=request.app.db_client
     )
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+    target_asset_id = None
 
     project, status_code = await project_model.get_project_or_create_one(
         project_id=project_id,
@@ -87,7 +92,26 @@ async def index_project(
                 "signal": response_signal
             }
         )
-    
+
+    if push_request.asset_name:
+        asset_record, record_exists = await asset_model.get_asset_record(
+            asset_project_id=project.project_id,
+            asset_name=push_request.asset_name,
+            current_user=current_user,
+        )
+        if asset_record is None:
+            signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if record_exists else ResponseSignal.FILE_ID_ERROR.value
+            status_code_response = status.HTTP_403_FORBIDDEN if record_exists else status.HTTP_400_BAD_REQUEST
+            detail = "File is private to another user." if record_exists else "No file found with the provided file identifier."
+            return JSONResponse(
+                status_code=status_code_response,
+                content={
+                    "signal": signal,
+                    "detail": detail,
+                }
+            )
+        target_asset_id = asset_record.asset_id
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=request.app.generation_client,
@@ -109,11 +133,27 @@ async def index_project(
     )
 
     # setup batching
-    total_chunks_count = await chunk_model.get_total_chunks_count(project_id=project.project_id)
+    total_chunks_count = await chunk_model.get_total_chunks_count(
+        project_id=project.project_id,
+        asset_id=target_asset_id,
+    )
+    if total_chunks_count == 0:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.NO_FILES_ERROR.value,
+                "detail": "No processed chunks found for the specified scope.",
+            },
+        )
+
     pbar = tqdm(total=total_chunks_count, desc="Vector Indexing", position=0)
 
     while has_records:
-        page_chunks = await chunk_model.get_poject_chunks(project_id=project.project_id, page_no=page_no)
+        page_chunks = await chunk_model.get_poject_chunks(
+            project_id=project.project_id,
+            page_no=page_no,
+            asset_id=target_asset_id,
+        )
         if len(page_chunks):
             page_no += 1
         
@@ -218,7 +258,8 @@ async def list_conversations(
     return JSONResponse(
         content={
             "signal": ResponseSignal.CONVERSATIONS_FETCH_SUCCESS.value,
-            "conversations": payload
+            "conversations": payload,
+            "total": len(payload)
         }
     )
 
@@ -248,7 +289,8 @@ async def list_user_doc_types(
     return JSONResponse(
         content={
             "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
-            "doc_types": doc_types
+            "doc_types": doc_types,
+            "total": len(doc_types)
         }
     )
 @nlp_router.get("/conversations/{conversation_id}/history")
@@ -754,6 +796,29 @@ async def summarize_project(
                 "detail": "The summarization provider did not return any content."
             }
         )
+
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    chunk_ids = [chunk.chunk_id for chunk in chunks if getattr(chunk, "chunk_id", None) is not None]
+
+    await summary_model.create_summary(
+        user_id=current_user.id,
+        project_id=project.project_id,
+        asset_id=target_asset_id,
+        summary_text=summary,
+        request_payload={
+            "file_id": summarize_request.file_id,
+            "max_chunks": summarize_request.max_chunks,
+            "focus": summarize_request.focus,
+            "max_output_tokens": summarize_request.max_output_tokens,
+        },
+        chunk_ids=chunk_ids,
+        chunk_count=len(chunks),
+        prompt_text=full_prompt,
+        max_output_tokens=summarize_request.max_output_tokens,
+    )
 
     return JSONResponse(
         content={

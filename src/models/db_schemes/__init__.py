@@ -6,4 +6,5 @@ from models.db_schemes.minirag.schemes import (
     User,
     ChatHistory,
     ChatConversation,
+    SummaryRecord,
 )
