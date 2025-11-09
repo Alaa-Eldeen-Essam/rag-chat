@@ -81,7 +81,7 @@ async def startup_span():
     await user_model.ensure_initial_admin(
         username="admin",
         password_hash=hash_password("admin123"),
-    )
+    )    
 
 async def shutdown_span():
     app.db_engine.dispose()
