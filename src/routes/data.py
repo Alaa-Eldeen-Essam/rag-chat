@@ -14,6 +14,7 @@ from models.AssetModel import AssetModel
 from models.db_schemes import DataChunk, Asset, User
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from routes.dependencies import get_current_user
+from controllers import NLPController
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -151,7 +152,13 @@ async def process_endpoint(
         is_private=process_request.is_private,
         require_owner=True,
     )
-
+    
+    nlp_controller = NLPController(
+        vectordb_client=request.app.vectordb_client,
+        generation_client=request.app.generation_client,
+        embedding_client=request.app.embedding_client,
+        template_parser=request.app.template_parser,
+    )
     if project is None:
         response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
         response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
@@ -348,9 +355,11 @@ async def list_assets(
     return JSONResponse(
         content={
             "signal": ResponseSignal.FILE_LIST_SUCCESS.value,
-            "assets": payload
+            "assets": payload,
+            "no_of_assets": len(payload),
         }
     )
+    
 @data_router.delete("/assets/{asset_id}")
 async def delete_asset(
     request: Request,
