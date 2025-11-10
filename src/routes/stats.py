@@ -8,19 +8,125 @@ from sqlalchemy import func
 from collections import Counter
 from typing import Dict, Any, List, Tuple, Optional
 import re
+import asyncio
 
 stats_router = APIRouter(
     prefix="/api/v1/stats",
     tags=["api_v1", "stats"],
 )
 
+# ✅ Extended STOPWORDS: English + Arabic + Egyptian dialects
 STOPWORDS = {
+    # English
     "the", "is", "are", "was", "were", "and", "or", "of", "a", "an", "to", "in", "for",
     "on", "with", "that", "this", "it", "as", "by", "be", "what", "how", "where",
-    "when", "why", "who", "from", "about", "into", "over", "under", "between"
+    "when", "why", "who", "from", "about", "into", "over", "under", "between",
+    "at", "but", "not", "so", "if", "then", "than", "too", "very", "can", "could",
+    "would", "should", "do", "does", "did", "have", "has", "had",
+    # Arabic (Modern Standard + Egyptian)
+    "من", "في", "على", "إلى", "عن", "هذا", "هذه", "ذلك", "تلك", "هناك", "هو", "هي",
+    "هم", "هن", "أنا", "انت", "إنت", "إنتي", "احنا", "إحنا", "انتم", "إنتو", "انتما",
+    "كل", "أي", "أين", "متى", "لماذا", "كيف", "ما", "ماذا", "الذي", "التي", "الذين",
+    "اللاتي", "اللواتي", "ال", "يا", "ده", "دي", "دول", "كده", "كذا", "كذاك", "أهو",
+    "أهي", "أهم", "ايه", "إيه", "ليه", "مش", "مافيش", "مفيش", "مش", "او", "ولا", "بس",
+    "كمان", "برضه", "يعني", "طيب", "تمام", "دلوقتي", "لسه", "اوي", "قوي", "كده", "ده",
+    "دي", "دول", "كده", "كده", "عشان", "علشان", "علي", "فيه", "فيها", "منها", "فيهم",
+    "منهم", "بتاع", "بتاعة", "بتوع", "بتاعي", "بتاعك", "بتاعته", "بتاعتها",
 }
 
+# ------------------------------------------------------------------------------------
+# Helper 1: User Activity Summary
+# ------------------------------------------------------------------------------------
+async def _compute_user_activity(session, user_id: int) -> Dict[str, Any]:
+    """Compute user activity: uploads, processed files, conversations, summaries generated, and per-project activity."""
 
+    # Total uploads (from Asset table)
+    uploads = (
+        await session.execute(
+            select(func.count(Asset.asset_id)).where(Asset.asset_user_id == user_id)
+        )
+    ).scalar() or 0
+
+    # Processed files (if asset_processed column exists)
+    processed_files = (
+        await session.execute(
+            select(func.count(Asset.asset_id))
+            .where(Asset.asset_user_id == user_id, Asset.asset_processed == True)
+        )
+    ).scalar() if hasattr(Asset, "asset_processed") else uploads
+
+    # Conversations initiated
+    conversations = (
+        await session.execute(
+            select(func.count(ChatConversation.conversation_id))
+            .where(ChatConversation.conversation_user_id == user_id)
+        )
+    ).scalar() or 0
+
+    # Summaries generated (if is_summary field exists)
+    summaries_generated = (
+        await session.execute(
+            select(func.count(ChatHistory.id))
+            .where(ChatHistory.user_id == user_id, ChatHistory.is_summary == True)
+        )
+    ).scalar() if hasattr(ChatHistory, "is_summary") else 0
+
+    # ✅ Per-project activity summary
+    per_project_data = {}
+
+    # Assets per project
+    if hasattr(Asset, "project_id"):
+        project_assets = await session.execute(
+            select(Asset.project_id, func.count(Asset.asset_id))
+            .where(Asset.asset_user_id == user_id)
+            .group_by(Asset.project_id)
+        )
+        for project_id, count in project_assets:
+            project_key = str(project_id or "unassigned")
+            per_project_data.setdefault(project_key, {"uploads": 0, "processed_files": 0, "conversations": 0})
+            per_project_data[project_key]["uploads"] = count
+
+        # Processed assets per project (if available)
+        if hasattr(Asset, "asset_processed"):
+            processed_per_project = await session.execute(
+                select(Asset.project_id, func.count(Asset.asset_id))
+                .where(Asset.asset_user_id == user_id, Asset.asset_processed == True)
+                .group_by(Asset.project_id)
+            )
+            for project_id, count in processed_per_project:
+                project_key = str(project_id or "unassigned")
+                per_project_data.setdefault(project_key, {"uploads": 0, "processed_files": 0, "conversations": 0})
+                per_project_data[project_key]["processed_files"] = count
+
+    # Conversations per project
+    if hasattr(ChatConversation, "project_id"):
+        project_convos = await session.execute(
+            select(ChatConversation.project_id, func.count(ChatConversation.conversation_id))
+            .where(ChatConversation.conversation_user_id == user_id)
+            .group_by(ChatConversation.project_id)
+        )
+        for project_id, count in project_convos:
+            project_key = str(project_id or "unassigned")
+            per_project_data.setdefault(project_key, {"uploads": 0, "processed_files": 0, "conversations": 0})
+            per_project_data[project_key]["conversations"] = count
+
+    # ✅ Compile the final activity object
+    activity = {
+        "uploads": uploads,
+        "processed_files": processed_files,
+        "conversations": conversations,
+        "summaries_generated": summaries_generated,
+    }
+
+    if per_project_data:
+        activity["projects"] = per_project_data
+
+    return activity
+
+
+# ------------------------------------------------------------------------------------
+# Helper 2: User Statistics
+# ------------------------------------------------------------------------------------
 async def _compute_user_stats(session, user_id: int) -> Dict[str, Any]:
     stats: Dict[str, Any] = {}
 
@@ -98,7 +204,7 @@ async def _compute_user_stats(session, user_id: int) -> Dict[str, Any]:
         total_session_seconds / len(session_durations) if session_durations else 0
     )
 
-    # Peak usage periods (hour of day)
+    # Peak usage periods (hour of day, daily, weekly)
     hour_counter = Counter()
     daily_counter = Counter()
     weekly_counter = Counter()
@@ -147,12 +253,12 @@ async def _compute_user_stats(session, user_id: int) -> Dict[str, Any]:
         for key, count in model_usage.items()
     }
 
-    # Most common query topics
+    # Most common query topics (multilingual stopword filtering)
     word_counter = Counter()
     for prompt in prompts:
         words = re.findall(r"\b\w+\b", prompt.lower())
         for word in words:
-            if len(word) < 3 or word in STOPWORDS:
+            if len(word) < 2 or word in STOPWORDS:
                 continue
             word_counter[word] += 1
     most_common_topics = [
@@ -200,65 +306,48 @@ async def _compute_user_stats(session, user_id: int) -> Dict[str, Any]:
 
     return stats
 
-
+# ------------------------------------------------------------------------------------
+# User Endpoint
+# ------------------------------------------------------------------------------------
 @stats_router.get("/user")
 async def user_statistics(request: Request, current_user: User = Depends(get_current_user)):
     async with request.app.db_client() as session:
         stats = await _compute_user_stats(session, current_user.id)
+        activity = await _compute_user_activity(session, current_user.id)
 
     return JSONResponse(
         content={
             "signal": ResponseSignal.USER_STATS_SUCCESS.value,
-            "statistics": stats
+            "statistics": stats,
+            "activity": activity
         }
     )
 
-
+# ------------------------------------------------------------------------------------
+# Global Statistics
+# ------------------------------------------------------------------------------------
 async def _compute_global_stats(session) -> Dict[str, Any]:
-    total_users = (
-        await session.execute(select(func.count(User.id)))
-    ).scalar() or 0
-
-    total_documents = (
-        await session.execute(select(func.count(Asset.asset_id)))
-    ).scalar() or 0
-
-    document_distribution_rows = await session.execute(
-        select(Asset.asset_document_type, func.count(Asset.asset_id))
-        .group_by(Asset.asset_document_type)
-    )
-    document_distribution = {
-        doc_type or "general": count
-        for doc_type, count in document_distribution_rows
-    }
-
-    total_conversations = (
-        await session.execute(select(func.count(ChatConversation.conversation_id)))
-    ).scalar() or 0
-
-    total_queries = (
-        await session.execute(select(func.count(ChatHistory.id)))
-    ).scalar() or 0
+    total_users = (await session.execute(select(func.count(User.id)))).scalar() or 0
+    total_documents = (await session.execute(select(func.count(Asset.asset_id)))).scalar() or 0
+    total_conversations = (await session.execute(select(func.count(ChatConversation.conversation_id)))).scalar() or 0
+    total_queries = (await session.execute(select(func.count(ChatHistory.id)))).scalar() or 0
 
     average_response_time = (
         await session.execute(
-            select(func.avg(ChatHistory.response_time_ms)).where(
-                ChatHistory.response_time_ms.isnot(None)
-            )
+            select(func.avg(ChatHistory.response_time_ms)).where(ChatHistory.response_time_ms.isnot(None))
         )
     ).scalar()
 
-    # Global model usage
-    global_model_usage_rows = await session.execute(
-        select(ChatHistory.model_key, func.count(ChatHistory.id))
-        .group_by(ChatHistory.model_key)
+    document_distribution_rows = await session.execute(
+        select(Asset.asset_document_type, func.count(Asset.asset_id)).group_by(Asset.asset_document_type)
     )
-    global_model_usage = {
-        (model_key or "unknown"): count
-        for model_key, count in global_model_usage_rows
-    }
+    document_distribution = {doc_type or "general": count for doc_type, count in document_distribution_rows}
 
-    # Global query doc type usage
+    global_model_usage_rows = await session.execute(
+        select(ChatHistory.model_key, func.count(ChatHistory.id)).group_by(ChatHistory.model_key)
+    )
+    global_model_usage = {(model_key or "unknown"): count for model_key, count in global_model_usage_rows}
+
     global_doc_type_rows = await session.execute(
         select(ChatHistory.doc_types).where(ChatHistory.doc_types.isnot(None))
     )
@@ -268,19 +357,15 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
         if isinstance(doc_types, list):
             global_doc_type_counter.update(dt.lower() for dt in doc_types)
 
-    # Top users by query count
     top_users_rows = await session.execute(
         select(ChatHistory.user_id, func.count(ChatHistory.id))
         .group_by(ChatHistory.user_id)
         .order_by(func.count(ChatHistory.id).desc())
         .limit(10)
     )
-    top_users = [
-        {"user_id": user_id, "queries": count}
-        for user_id, count in top_users_rows
-    ]
+    top_users = [{"user_id": user_id, "queries": count} for user_id, count in top_users_rows]
 
-    global_stats = {
+    return {
         "totals": {
             "users": total_users,
             "documents": total_documents,
@@ -294,15 +379,21 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
         "top_users": top_users,
     }
 
-    return global_stats
-
-
+# ------------------------------------------------------------------------------------
+# Admin Endpoint (Paginated)
+# ------------------------------------------------------------------------------------
 @stats_router.get("/admin")
 async def admin_statistics(
     request: Request,
-    user_id: Optional[int] = Query(None),
+    user_id: Optional[int] = Query(None, description="Fetch stats for a specific user"),
+    page: int = Query(1, ge=1, description="Page number for paginated user stats"),
+    limit: int = Query(20, ge=1, le=100, description="Number of users per page (max 100)"),
     current_user: User = Depends(get_current_user),
 ):
+    """Admin statistics endpoint:
+    - If `user_id` is provided → stats for that specific user.
+    - Otherwise → global stats + paginated per-user statistics.
+    """
     if not getattr(current_user, "is_admin", False):
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -315,12 +406,12 @@ async def admin_statistics(
     async with request.app.db_client() as session:
         global_stats = await _compute_global_stats(session)
         user_stats = None
+        paginated_user_stats = []
 
+        # ✅ Case 1: Fetch stats for a specific user
         if user_id is not None:
             user_exists = (
-                await session.execute(
-                    select(User).where(User.id == user_id)
-                )
+                await session.execute(select(User).where(User.id == user_id))
             ).scalar_one_or_none()
             if not user_exists:
                 return JSONResponse(
@@ -331,12 +422,52 @@ async def admin_statistics(
                     }
                 )
             user_stats = await _compute_user_stats(session, user_id)
+            user_activity = await _compute_user_activity(session, user_id)
 
+        # ✅ Case 2: Paginated per-user activity
+        else:
+            total_users = (await session.execute(select(func.count(User.id)))).scalar() or 0
+            offset = (page - 1) * limit
+
+            all_users = (
+                await session.execute(
+                    select(User.id).offset(offset).limit(limit)
+                )
+            ).scalars().all()
+
+            # Parallelized for speed
+            tasks = [
+                asyncio.gather(_compute_user_stats(session, uid), _compute_user_activity(session, uid))
+                for uid in all_users
+            ]
+            results = await asyncio.gather(*tasks)
+
+            for uid, (stats, activity) in zip(all_users, results):
+                paginated_user_stats.append({
+                    "user_id": uid,
+                    "statistics": stats,
+                    "activity": activity
+                })
+
+    # ✅ Build final response
     response_payload = {
         "signal": ResponseSignal.ADMIN_STATS_SUCCESS.value,
         "global": global_stats,
     }
+
     if user_stats:
-        response_payload["user"] = {"user_id": user_id, "statistics": user_stats}
+        response_payload["user"] = {
+            "user_id": user_id,
+            "statistics": user_stats,
+            "activity": user_activity,
+        }
+    else:
+        response_payload["users"] = paginated_user_stats
+        response_payload["pagination"] = {
+            "page": page,
+            "limit": limit,
+            "total_users": total_users,
+            "total_pages": (total_users + limit - 1) // limit,
+        }
 
     return JSONResponse(content=response_payload)
