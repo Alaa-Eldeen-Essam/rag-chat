@@ -17,5 +17,10 @@ asyncpg==0.30.0
 alembic==1.14.0
 psycopg2==2.9.10
 bcrypt==4.1.2
+langdetect==1.0.9
 pgvector==0.4.0
 nltk==3.9.1
+# Monitoring and metrics
+prometheus-client==0.21.1
+starlette-exporter==0.23.0
+fastapi-health==0.4.0

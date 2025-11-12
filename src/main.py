@@ -9,8 +9,11 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from models.UserModel import UserModel
 from helpers.security import hash_password
+from utils.metrics import setup_metrics
 
 app = FastAPI()
+
+setup_metrics(app)
 
 app.add_middleware(
     CORSMiddleware,

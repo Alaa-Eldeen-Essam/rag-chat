@@ -13,6 +13,8 @@ from models.db_schemes import User, Asset
 from routes.dependencies import get_current_user
 from helpers.assets import get_asset_display_name
 from helpers.config import get_settings, Settings
+from stores.llm.templates.template_parser import TemplateParser
+from langdetect import detect, LangDetectException, DetectorFactory
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from sqlalchemy import select
 from tqdm.auto import tqdm
@@ -21,6 +23,19 @@ import logging
 import json
 import time
 from typing import List, Optional
+
+DetectorFactory.seed = 0
+
+def detect_language_or_default(text: str, default: str) -> str:
+    if not text:
+        return default
+    try:
+        lang = detect(text)
+    except LangDetectException:
+        return default
+    if lang.startswith("ar"):
+        return "ar"
+    return "en"
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -113,11 +128,21 @@ async def index_project(
             )
         target_asset_id = asset_record.asset_id
 
+    focus_text = summarize_request.focus or ""
+    template_language = detect_language_or_default(
+        focus_text,
+        app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en",
+    )
+    template_parser = TemplateParser(
+        language=template_language,
+        default_language=app_settings.DEFAULT_LANG or "en",
+    )
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=generation_client,
         embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
+        template_parser=template_parser,
     )
 
     has_records = True
@@ -419,6 +444,7 @@ async def answer_rag(
     project_id: int,
     search_request: SearchRequest,
     current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
 ):
     
     project_model = await ProjectModel.create_instance(
@@ -468,11 +494,20 @@ async def answer_rag(
     model_key_used = requested_model_key if generation_client else default_model_key or "best"
     generation_client = generation_client or default_generation_client
 
+    template_language = detect_language_or_default(
+        search_request.text,
+        app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en",
+    )
+    template_parser = TemplateParser(
+        language=template_language,
+        default_language=app_settings.DEFAULT_LANG or "en",
+    )
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=generation_client,
         embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
+        template_parser=template_parser,
     )
 
     chat_history_model = await ChatHistoryModel.create_instance(
