@@ -412,6 +412,26 @@ async def search_index(
             }
         )
 
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    project_assets = await asset_model.get_all_project_assets(
+        asset_project_id=project.project_id,
+        asset_type=AssetTypeEnum.FILE.value,
+        current_user=current_user,
+    )
+    accessible_asset_ids = {asset.asset_id for asset in project_assets}
+
+    if not accessible_asset_ids:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.NO_FILES_ERROR.value,
+                "detail": "No accessible files are available for search in this project."
+            }
+        )
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=request.app.generation_client,
@@ -420,7 +440,10 @@ async def search_index(
     )
 
     results = await nlp_controller.search_vector_db_collection(
-        project=project, text=search_request.text, limit=search_request.limit
+        project=project,
+        text=search_request.text,
+        limit=search_request.limit,
+        asset_ids=list(accessible_asset_ids),
     )
 
     if not results:
@@ -479,10 +502,21 @@ async def answer_rag(
     )
     asset_label_lookup = {}
     asset_label_lookup_by_name = {}
+    accessible_asset_ids = set()
     for asset in project_assets:
         display_name = get_asset_display_name(asset) or asset.asset_name
         asset_label_lookup[asset.asset_id] = display_name
         asset_label_lookup_by_name[asset.asset_name] = display_name
+        accessible_asset_ids.add(asset.asset_id)
+
+    if not accessible_asset_ids:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.NO_FILES_ERROR.value,
+                "detail": "No accessible files are available for this project.",
+            },
+        )
 
     generation_clients = getattr(request.app, "generation_clients", {})
     generation_models = getattr(request.app, "generation_model_ids", {})
@@ -553,6 +587,32 @@ async def answer_rag(
     collector = {"output": [], "reasoning": []} if search_request.stream else None
     doc_type_filter = extract_document_types_from_query(search_request.text)
     asset_filter = search_request.asset_id
+
+    # Ensure requested asset filter is within the user's accessible scope
+    asset_ids_filter = None
+    if asset_filter is not None:
+        try:
+            asset_filter_int = int(asset_filter)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.FILE_ID_ERROR.value,
+                    "detail": "Invalid asset_id filter.",
+                },
+            )
+
+        if asset_filter_int not in accessible_asset_ids:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                    "detail": "You do not have access to the requested file.",
+                },
+            )
+        asset_ids_filter = [asset_filter_int]
+    else:
+        asset_ids_filter = list(accessible_asset_ids)
     start_time = time.perf_counter()
 
     answer_result, full_prompt, chat_history = await nlp_controller.answer_rag_question(
@@ -563,7 +623,7 @@ async def answer_rag(
         stream=bool(search_request.stream),
         collector=collector,
         doc_types=doc_type_filter if doc_type_filter else None,
-        asset_ids=[asset_filter] if asset_filter else None,
+        asset_ids=asset_ids_filter,
         asset_labels=asset_label_lookup if asset_label_lookup else None,
         asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
     )
