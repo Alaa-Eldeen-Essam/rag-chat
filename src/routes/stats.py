@@ -450,13 +450,13 @@ async def submit_feedback(
                 },
             )
 
-        async with session.begin():
-            if feedback.rating is not None:
-                record.rating = feedback.rating
-            if feedback.is_helpful is not None:
-                record.is_helpful = feedback.is_helpful
-            session.add(record)
+        # Update fields and commit using the existing transaction
+        if feedback.rating is not None:
+            record.rating = feedback.rating
+        if feedback.is_helpful is not None:
+            record.is_helpful = feedback.is_helpful
 
+        session.add(record)
         await session.commit()
 
     return JSONResponse(
@@ -539,15 +539,16 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
     # Requests per hour (last 24 hours)
     now = datetime.utcnow()
     day_ago = now - timedelta(hours=24)
+    hour_bucket = func.date_trunc("hour", ChatHistory.timestamp).label("hour_bucket")
     hourly_rows = await session.execute(
         select(
-            func.date_trunc("hour", ChatHistory.timestamp),
+            hour_bucket,
             ChatHistory.model_key,
             func.count(ChatHistory.id),
         )
         .where(ChatHistory.timestamp >= day_ago)
-        .group_by(func.date_trunc("hour", ChatHistory.timestamp), ChatHistory.model_key)
-        .order_by(func.date_trunc("hour", ChatHistory.timestamp))
+        .group_by(hour_bucket, ChatHistory.model_key)
+        .order_by(hour_bucket)
     )
     requests_per_hour: List[Dict[str, Any]] = []
     for ts, model_key, count in hourly_rows.all():
@@ -605,19 +606,24 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
             visibility_usage[key] = count
 
     # Global retrieval statistics (if any metadata has been recorded)
-    retr_rows = await session.execute(
+    retr_rows_result = await session.execute(
         select(
             ChatHistory.retrieved_chunks,
             ChatHistory.retrieved_doc_types,
             ChatHistory.fallback_used,
             ChatHistory.rating,
+            ChatHistory.retrieved_asset_ids,
         )
     )
+    retr_rows = retr_rows_result.all()
     retrieved_counts: List[int] = []
     retrieved_doc_type_counter = Counter()
     global_ratings: List[int] = []
     fallback_total = 0
-    for r_chunks, r_doc_types, r_fallback, r_rating in retr_rows.all():
+    # Per-asset risk stats: queries, ratings, fallback
+    asset_risk_stats: Dict[int, Dict[str, Any]] = {}
+
+    for r_chunks, r_doc_types, r_fallback, r_rating, r_asset_ids in retr_rows:
         if r_chunks is not None:
             retrieved_counts.append(int(r_chunks))
         if isinstance(r_doc_types, list):
@@ -630,6 +636,29 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
             global_ratings.append(int(r_rating))
         if r_fallback:
             fallback_total += 1
+
+        # Track per-asset stats for content risk analysis
+        if isinstance(r_asset_ids, list):
+            for raw_aid in r_asset_ids:
+                try:
+                    aid_int = int(raw_aid)
+                except (TypeError, ValueError):
+                    continue
+                stats = asset_risk_stats.setdefault(
+                    aid_int,
+                    {
+                        "queries": 0,
+                        "rating_sum": 0,
+                        "rating_count": 0,
+                        "fallback_count": 0,
+                    },
+                )
+                stats["queries"] += 1
+                if r_rating is not None:
+                    stats["rating_sum"] += int(r_rating)
+                    stats["rating_count"] += 1
+                if r_fallback:
+                    stats["fallback_count"] += 1
 
     avg_retrieved_chunks = (
         sum(retrieved_counts) / len(retrieved_counts) if retrieved_counts else 0.0
@@ -652,6 +681,57 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
     avg_global_rating = (
         sum(global_ratings) / len(global_ratings) if global_ratings else 0.0
     )
+
+    # Resolve per-asset metadata and compute content risk entries
+    asset_meta_rows = await session.execute(
+        select(
+            Asset.asset_id,
+            Asset.asset_document_type,
+            Asset.asset_visibility,
+            Asset.asset_department,
+            Asset.asset_config,
+        )
+    )
+    asset_meta_map: Dict[int, Dict[str, Any]] = {}
+    for asset_id, doc_type, visibility, department, config in asset_meta_rows.all():
+        cfg = config or {}
+        original_name = cfg.get("original_filename") or cfg.get("name")
+        asset_meta_map[int(asset_id)] = {
+            "doc_type": doc_type,
+            "visibility": (visibility or "private").lower(),
+            "department": department,
+            "name": original_name or f"Asset #{asset_id}",
+        }
+
+    content_risk: List[Dict[str, Any]] = []
+    for asset_id, stats in asset_risk_stats.items():
+        queries = stats.get("queries", 0) or 0
+        if queries == 0:
+            continue
+        rating_sum = stats.get("rating_sum", 0) or 0
+        rating_count = stats.get("rating_count", 0) or 0
+        fallback_count = stats.get("fallback_count", 0) or 0
+        avg_rating_asset = (
+            (rating_sum / rating_count) if rating_count > 0 else None
+        )
+        fallback_rate = fallback_count / queries if queries > 0 else 0.0
+
+        meta = asset_meta_map.get(asset_id, {})
+        content_risk.append(
+            {
+                "asset_id": asset_id,
+                "name": meta.get("name", f"Asset #{asset_id}"),
+                "doc_type": meta.get("doc_type"),
+                "visibility": meta.get("visibility", "private"),
+                "department": meta.get("department"),
+                "queries": queries,
+                "avg_rating": avg_rating_asset,
+                "fallback_rate": fallback_rate,
+            }
+        )
+
+    # Sort by descending queries so most impactful docs are first
+    content_risk.sort(key=lambda item: item.get("queries", 0), reverse=True)
 
     return {
         "totals": {
@@ -690,6 +770,7 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
             "queries_by_department": queries_by_department,
             "usage_by_visibility": visibility_usage,
         },
+        "content_risk": content_risk,
     }
 
 # ------------------------------------------------------------------------------------

@@ -508,11 +508,20 @@ async def search_index(
             }
         )
 
+    # Determine template language for summary:
+    # allow explicit override via `output_lang`, otherwise fall back to app settings.
+    requested_output_lang = (summarize_request.output_lang or "").strip().lower() if getattr(summarize_request, "output_lang", None) else ""
+    template_language = requested_output_lang or app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en"
+    template_parser = TemplateParser(
+        language=template_language,
+        default_language=app_settings.DEFAULT_LANG or "en",
+    )
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=request.app.generation_client,
         embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
+        template_parser=template_parser,
     )
 
     results = await nlp_controller.search_vector_db_collection(
@@ -1102,6 +1111,43 @@ async def summarize_project(
             }
         )
 
+    total_chunks = len(chunks)
+
+    # Optional focus-based filtering: if user provides a focus text and we have many chunks,
+    # restrict to chunks that contain focus keywords to keep the summary manageable and relevant.
+    focus_text = (summarize_request.focus or "").strip()
+    if focus_text and total_chunks > 100:
+        keywords = [
+            word.lower()
+            for word in focus_text.split()
+            if len(word) > 3
+        ]
+        if keywords:
+            filtered_chunks = [
+                chunk
+                for chunk in chunks
+                if any(
+                    kw in (getattr(chunk, "chunk_text", "") or "").lower()
+                    for kw in keywords
+                )
+            ]
+            # Use filtered chunks only if we still have a reasonable amount of context.
+            if len(filtered_chunks) >= 10:
+                chunks = filtered_chunks
+                total_chunks = len(chunks)
+
+    # Safety clamp: when max_chunks is 0 or None and the document is very large,
+    # cap the effective number of chunks to avoid oversized prompts.
+    MAX_SAFE_CHUNKS = 200
+    if (summarize_request.max_chunks is None or summarize_request.max_chunks == 0) and total_chunks > MAX_SAFE_CHUNKS:
+        chunks = chunks[:MAX_SAFE_CHUNKS]
+        total_chunks = len(chunks)
+
+    # Keep track of the original chunks for metadata (chunk_ids, counts),
+    # but allow a separate list of "summary input chunks" that may pass through
+    # a hierarchical summarization step.
+    source_chunks = chunks
+
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=request.app.generation_client,
@@ -1115,17 +1161,61 @@ async def summarize_project(
         or app_settings.GENERATION_DAFAULT_MAX_TOKENS
     )
 
+    # Hierarchical summarization for very large documents:
+    # - First, generate summaries for sections of chunks.
+    # - Then, summarize those section summaries to produce a document-level summary.
+    summary_input_chunks = chunks
+    HIERARCHICAL_THRESHOLD = 120  # number of chunks above which we switch to hierarchical
+    SECTION_SIZE = 20  # chunks per section
+
+    if total_chunks > HIERARCHICAL_THRESHOLD:
+        section_summaries: List[str] = []
+        section_max_tokens = min(summary_max_tokens, 256)
+
+        for i in range(0, total_chunks, SECTION_SIZE):
+            section = chunks[i : i + SECTION_SIZE]
+            if not section:
+                continue
+
+            section_summary, _ = nlp_controller.summarize_chunks(
+                chunks=section,
+                focus=summarize_request.focus,
+                max_output_tokens=section_max_tokens,
+                asset_labels=asset_label_lookup if asset_label_lookup else None,
+                asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+                stream=False,
+                collector=None,
+            )
+
+            if section_summary and isinstance(section_summary, str):
+                section_summaries.append(section_summary.strip())
+
+        if section_summaries:
+            # Build synthetic "chunks" from section summaries for the final pass.
+            summary_input_chunks = [
+                SimpleNamespace(
+                    chunk_text=text,
+                    chunk_order=idx + 1,
+                    chunk_metadata={"section_index": idx + 1},
+                )
+                for idx, text in enumerate(section_summaries)
+            ]
+
     summary_model = await SummaryModel.create_instance(
         db_client=request.app.db_client
     )
 
-    chunk_ids = [chunk.chunk_id for chunk in chunks if getattr(chunk, "chunk_id", None) is not None]
+    chunk_ids = [
+        chunk.chunk_id
+        for chunk in source_chunks
+        if getattr(chunk, "chunk_id", None) is not None
+    ]
     stream_enabled = summarize_request.stream if summarize_request.stream is not None else True
 
     collector = {"output": [], "reasoning": []} if stream_enabled else None
 
     summary_output, full_prompt = nlp_controller.summarize_chunks(
-        chunks=chunks,
+        chunks=summary_input_chunks,
         focus=summarize_request.focus,
         max_output_tokens=summary_max_tokens,
         asset_labels=asset_label_lookup if asset_label_lookup else None,
@@ -1168,19 +1258,20 @@ async def summarize_project(
                 signal_value = ResponseSignal.SUMMARY_GENERATION_SUCCESS.value if final_summary else ResponseSignal.SUMMARY_GENERATION_ERROR.value
 
                 if final_summary:
-                    await summary_model.create_summary(
-                        user_id=current_user.id,
-                        project_id=project.project_id,
-                        asset_id=target_asset_id,
-                        summary_text=final_summary,
-                        request_payload={
-                            "file_id": summarize_request.file_id,
-                            "max_chunks": summarize_request.max_chunks,
-                            "focus": summarize_request.focus,
-                            "requested_max_output_tokens": summarize_request.max_output_tokens,
-                            "max_output_tokens_used": summary_max_tokens,
-                            "model": model_key_used,
-                        },
+                        await summary_model.create_summary(
+                            user_id=current_user.id,
+                            project_id=project.project_id,
+                            asset_id=target_asset_id,
+                            summary_text=final_summary,
+                            request_payload={
+                                "file_id": summarize_request.file_id,
+                                "max_chunks": summarize_request.max_chunks,
+                                "focus": summarize_request.focus,
+                                "requested_max_output_tokens": summarize_request.max_output_tokens,
+                                "max_output_tokens_used": summary_max_tokens,
+                                "model": model_key_used,
+                                "output_lang": summarize_request.output_lang,
+                            },
                         chunk_ids=chunk_ids,
                         chunk_count=len(chunks),
                         prompt_text=full_prompt,
@@ -1225,6 +1316,7 @@ async def summarize_project(
             "requested_max_output_tokens": summarize_request.max_output_tokens,
             "max_output_tokens_used": summary_max_tokens,
             "model": model_key_used,
+            "output_lang": summarize_request.output_lang,
         },
         chunk_ids=chunk_ids,
         chunk_count=len(chunks),

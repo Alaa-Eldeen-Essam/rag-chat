@@ -21,6 +21,7 @@ class SummarizeRequest(BaseModel):
     focus: Optional[str] = None
     stream: Optional[bool] = True
     model: Optional[str] = None
+    output_lang: Optional[str] = None
 
 
 class ConversationUpdateRequest(BaseModel):

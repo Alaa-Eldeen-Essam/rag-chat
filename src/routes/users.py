@@ -180,6 +180,42 @@ async def list_users(
     )
 
 
+@users_router.get("/departments")
+async def list_departments(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List distinct departments in the system.
+    - Admins: see all departments.
+    - Normal users: see only their own department.
+    """
+    async with request.app.db_client() as session:
+        if getattr(current_user, "is_admin", False):
+            result = await session.execute(
+                select(func.distinct(User.department))
+            )
+        else:
+            result = await session.execute(
+                select(func.distinct(User.department)).where(
+                    User.department == current_user.department
+                )
+            )
+        rows = result.all()
+
+    departments = sorted(
+        { (dept or "").strip() for (dept,) in rows if dept and dept.strip() }
+    )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_LIST_SUCCESS.value,
+            "departments": departments,
+            "total": len(departments),
+        }
+    )
+
+
 @users_router.post("/admin")
 async def create_admin_user(
     request: Request,

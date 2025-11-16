@@ -50,7 +50,7 @@ class ProcessController(BaseController):
         return None
 
     def process_file_content(self, file_content: list, file_id: str,
-                            chunk_size: int=100, overlap_size: int=20):
+                            chunk_size: int=1200, overlap_size: int=250):
 
         file_content_texts = [
             rec.page_content
