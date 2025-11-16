@@ -1,6 +1,6 @@
 from fastapi import APIRouter, status, Request, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest
+from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest, ConversationUpdateRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
 from models.SummaryModel import SummaryModel
@@ -9,14 +9,15 @@ from models import ResponseSignal
 from models.AssetModel import AssetModel
 from models.ChatHistoryModel import ChatHistoryModel, MAX_CONVERSATION_MESSAGES
 from models.ChatConversationModel import ChatConversationModel
-from models.db_schemes import User, Asset
+from models.db_schemes import User, Asset, SummaryRecord
 from routes.dependencies import get_current_user
 from helpers.assets import get_asset_display_name
 from helpers.config import get_settings, Settings
 from stores.llm.templates.template_parser import TemplateParser
 from langdetect import detect, LangDetectException, DetectorFactory
 from models.enums.AssetTypeEnum import AssetTypeEnum
-from sqlalchemy import select
+from sqlalchemy import select, or_
+from types import SimpleNamespace
 from tqdm.auto import tqdm
 
 import logging
@@ -230,8 +231,9 @@ async def get_project_index_info(
     project, status_code = await project_model.get_project_or_create_one(
         project_id=project_id,
         current_user=current_user,
-        create_if_missing=False,
+        create_if_missing=True,
         is_private=None,
+        require_owner=False,
     )
 
     if not project:
@@ -295,12 +297,18 @@ async def list_user_doc_types(
     current_user: User = Depends(get_current_user),
 ):
     async with request.app.db_client() as session:
+        conditions = [Asset.asset_document_type.isnot(None)]
+        if not getattr(current_user, "is_admin", False):
+            conditions.append(
+                or_(
+                    Asset.asset_is_private.is_(False),
+                    Asset.asset_user_id == current_user.id,
+                )
+            )
+
         result = await session.execute(
             select(Asset.asset_document_type)
-            .where(
-                Asset.asset_user_id == current_user.id,
-                Asset.asset_document_type.isnot(None)
-            )
+            .where(*conditions)
             .distinct()
         )
         doc_types = sorted(
@@ -380,6 +388,74 @@ async def get_conversation_history(
                 "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
             },
             "history": history_payload,
+        }
+    )
+
+
+@nlp_router.patch("/conversations/{conversation_id}")
+async def rename_conversation(
+    request: Request,
+    conversation_id: int,
+    update: ConversationUpdateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    conversation_model = await ChatConversationModel.create_instance(
+        db_client=request.app.db_client
+    )
+    conversation = await conversation_model.get_conversation(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+    )
+    if not conversation:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
+                "detail": "Conversation not found.",
+            },
+        )
+
+    await conversation_model.update_conversation_title(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+        title=update.title.strip() or "New Conversation",
+    )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
+            "conversation_id": conversation_id,
+            "title": update.title,
+        }
+    )
+
+
+@nlp_router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    request: Request,
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    conversation_model = await ChatConversationModel.create_instance(
+        db_client=request.app.db_client
+    )
+    deleted = await conversation_model.delete_conversation(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+    )
+    if not deleted:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                "detail": "Conversation not found.",
+            },
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_DELETE_SUCCESS.value,
+            "conversation_id": conversation_id,
         }
     )
 
@@ -495,26 +571,30 @@ async def answer_rag(
         db_client=request.app.db_client
     )
 
-    project_assets = await asset_model.get_all_project_assets(
-        asset_project_id=project.project_id,
+    # Collect all accessible assets across projects (own + public, or all for admins)
+    all_assets = await asset_model.get_all_accessible_assets(
         asset_type=AssetTypeEnum.FILE.value,
         current_user=current_user,
     )
     asset_label_lookup = {}
     asset_label_lookup_by_name = {}
     accessible_asset_ids = set()
-    for asset in project_assets:
+    assets_by_project_id = {}
+    asset_to_project: dict[int, int] = {}
+    for asset in all_assets:
         display_name = get_asset_display_name(asset) or asset.asset_name
         asset_label_lookup[asset.asset_id] = display_name
         asset_label_lookup_by_name[asset.asset_name] = display_name
         accessible_asset_ids.add(asset.asset_id)
+        assets_by_project_id.setdefault(asset.asset_project_id, []).append(asset)
+        asset_to_project[asset.asset_id] = asset.asset_project_id
 
     if not accessible_asset_ids:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "signal": ResponseSignal.NO_FILES_ERROR.value,
-                "detail": "No accessible files are available for this project.",
+                "detail": "No accessible files are available for search.",
             },
         )
 
@@ -585,11 +665,15 @@ async def answer_rag(
     ]
 
     collector = {"output": [], "reasoning": []} if search_request.stream else None
-    doc_type_filter = extract_document_types_from_query(search_request.text)
+
+    explicit_doc_type = (search_request.doc_type or "").strip().lower() if hasattr(search_request, "doc_type") else ""
+    if explicit_doc_type and explicit_doc_type != "all":
+        doc_type_filter = [explicit_doc_type]
+    else:
+        doc_type_filter = extract_document_types_from_query(search_request.text)
     asset_filter = search_request.asset_id
 
     # Ensure requested asset filter is within the user's accessible scope
-    asset_ids_filter = None
     if asset_filter is not None:
         try:
             asset_filter_int = int(asset_filter)
@@ -610,33 +694,71 @@ async def answer_rag(
                     "detail": "You do not have access to the requested file.",
                 },
             )
-        asset_ids_filter = [asset_filter_int]
-    else:
-        asset_ids_filter = list(accessible_asset_ids)
     start_time = time.perf_counter()
 
-    answer_result, full_prompt, chat_history = await nlp_controller.answer_rag_question(
-        project=project,
+    # Build project -> asset_ids mapping for search
+    asset_ids_by_project: dict[int, list[int]] = {}
+    if asset_filter is not None:
+        asset_filter_int = int(asset_filter)
+        project_for_asset = asset_to_project.get(asset_filter_int)
+        if project_for_asset is not None:
+            asset_ids_by_project[project_for_asset] = [asset_filter_int]
+    else:
+        for pid, assets in assets_by_project_id.items():
+            asset_ids_by_project[pid] = [a.asset_id for a in assets]
+
+    retrieved_documents = []
+    if asset_ids_by_project:
+        for pid, asset_ids_for_project in asset_ids_by_project.items():
+            project_stub = SimpleNamespace(project_id=pid)
+            results = await nlp_controller.search_vector_db_collection(
+                project=project_stub,
+                text=search_request.text,
+                limit=search_request.limit,
+                doc_types=doc_type_filter if doc_type_filter else None,
+                asset_ids=asset_ids_for_project,
+            )
+            if results:
+                retrieved_documents.extend(results)
+
+    answer_result, full_prompt, chat_history = await nlp_controller.generate_rag_answer_from_documents(
+        retrieved_documents=retrieved_documents,
         query=search_request.text,
-        limit=search_request.limit,
         chat_messages=chat_messages,
         stream=bool(search_request.stream),
         collector=collector,
-        doc_types=doc_type_filter if doc_type_filter else None,
-        asset_ids=asset_ids_filter,
         asset_labels=asset_label_lookup if asset_label_lookup else None,
         asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
     )
 
-    if full_prompt is None or chat_history is None:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
-                "conversation_id": conversation.conversation_id,
-                "conversation_title": conversation.conversation_title,
-            }
-        )
+    # Basic retrieval stats for later analytics
+    retrieved_chunks_count = len(retrieved_documents) if retrieved_documents else 0
+    retrieved_doc_types: List[str] = []
+    retrieved_asset_ids: List[int] = []
+    if retrieved_documents:
+        for doc in retrieved_documents:
+            metadata = getattr(doc, "metadata", None)
+            doc_type_value = None
+            asset_id_value = None
+            if isinstance(metadata, dict):
+                doc_type_value = metadata.get("doc_type") or metadata.get("document_type")
+                asset_id_value = metadata.get("asset_id")
+            elif metadata is not None and hasattr(metadata, "get"):
+                doc_type_value = metadata.get("doc_type") or metadata.get("document_type")
+                asset_id_value = metadata.get("asset_id")
+            if isinstance(doc_type_value, str):
+                dt = doc_type_value.strip().lower()
+                if dt and dt not in retrieved_doc_types:
+                    retrieved_doc_types.append(dt)
+            if asset_id_value is not None:
+                try:
+                    aid_int = int(asset_id_value)
+                    if aid_int not in retrieved_asset_ids:
+                        retrieved_asset_ids.append(aid_int)
+                except (TypeError, ValueError):
+                    continue
+
+    no_answer_from_docs = answer_result is None and (full_prompt is None or chat_history is None)
 
     def compose_final_answer(store: dict) -> str:
         output_text = "".join(store.get("output", [])) if store else ""
@@ -653,17 +775,17 @@ async def answer_rag(
             return reasoning_text
         return ""
 
-    if search_request.stream:
-        if answer_result is None:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "signal": ResponseSignal.RAG_ANSWER_ERROR.value
-                }
-            )
+    history_filter = doc_type_filter.copy() if doc_type_filter else []
+    if asset_filter is not None:
+        history_filter.append(f"asset:{asset_filter}")
 
+    fallback_answer = (
+        "I don't have enough information in your indexed documents to answer this question."
+    )
+
+    if search_request.stream:
         async def event_stream():
-            try:
+            if no_answer_from_docs:
                 yield json.dumps({
                     "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
                     "conversation_id": conversation.conversation_id,
@@ -672,51 +794,130 @@ async def answer_rag(
                     "model_id": generation_models.get(model_key_used),
                 }) + "\n"
 
-                for chunk in answer_result:
-                    if chunk:
-                        yield json.dumps({
-                            "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
-                            "delta": chunk
-                        }) + "\n"
-            finally:
-                final_answer = compose_final_answer(collector)
-                signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
+                yield json.dumps({
+                    "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
+                    "delta": fallback_answer
+                }) + "\n"
 
-                if final_answer:
-                    response_time_ms = int((time.perf_counter() - start_time) * 1000)
-                    await chat_history_model.create_history(
-                        user_id=current_user.id,
-                        conversation_id=conversation.conversation_id,
-                        prompt=search_request.text,
-                        answer=final_answer,
-                        model_key=model_key_used,
-                        doc_types=doc_type_filter or ["all"],
-                        response_time_ms=response_time_ms,
-                    )
-                    await conversation_model.touch_conversation(conversation.conversation_id)
-
-                history_filter = doc_type_filter.copy() if doc_type_filter else []
-                if asset_filter is not None:
-                    history_filter.append(f"asset:{asset_filter}")
+                response_time_ms = int((time.perf_counter() - start_time) * 1000)
+                history_record = await chat_history_model.create_history(
+                    user_id=current_user.id,
+                    conversation_id=conversation.conversation_id,
+                    prompt=search_request.text,
+                    answer=fallback_answer,
+                    model_key=model_key_used,
+                    doc_types=history_filter or ["all"],
+                    response_time_ms=response_time_ms,
+                    fallback_used=True,
+                    retrieved_chunks=retrieved_chunks_count,
+                    retrieved_doc_types=retrieved_doc_types or None,
+                    retrieved_asset_ids=retrieved_asset_ids or None,
+                )
+                await conversation_model.touch_conversation(conversation.conversation_id)
 
                 payload = {
-                    "signal": signal_value,
-                    "answer": final_answer,
-                    "full_prompt": full_prompt,
-                    "chat_history": chat_history,
+                    "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
+                    "answer": fallback_answer,
+                    "full_prompt": None,
+                    "chat_history": [],
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
                     "document_types": history_filter or ["all"],
                     "model": model_key_used,
                     "model_id": generation_models.get(model_key_used),
                     "asset_id": asset_filter,
+                    "message_id": history_record.id,
                 }
                 yield json.dumps(payload) + "\n"
+            else:
+                try:
+                    yield json.dumps({
+                        "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
+                        "conversation_id": conversation.conversation_id,
+                        "conversation_title": conversation.conversation_title,
+                        "model": model_key_used,
+                        "model_id": generation_models.get(model_key_used),
+                    }) + "\n"
+
+                    for chunk in answer_result:
+                        if chunk:
+                            yield json.dumps({
+                                "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
+                                "delta": chunk
+                            }) + "\n"
+                finally:
+                    final_answer = compose_final_answer(collector)
+                    signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
+
+                    history_record = None
+                    if final_answer:
+                        response_time_ms = int((time.perf_counter() - start_time) * 1000)
+                        history_record = await chat_history_model.create_history(
+                            user_id=current_user.id,
+                            conversation_id=conversation.conversation_id,
+                            prompt=search_request.text,
+                            answer=final_answer,
+                            model_key=model_key_used,
+                            doc_types=history_filter or ["all"],
+                            response_time_ms=response_time_ms,
+                            fallback_used=False,
+                            retrieved_chunks=retrieved_chunks_count,
+                            retrieved_doc_types=retrieved_doc_types or None,
+                            retrieved_asset_ids=retrieved_asset_ids or None,
+                        )
+                        await conversation_model.touch_conversation(conversation.conversation_id)
+
+                    payload = {
+                        "signal": signal_value,
+                        "answer": final_answer,
+                        "full_prompt": full_prompt,
+                        "chat_history": chat_history,
+                        "conversation_id": conversation.conversation_id,
+                        "conversation_title": conversation.conversation_title,
+                        "document_types": history_filter or ["all"],
+                        "model": model_key_used,
+                        "model_id": generation_models.get(model_key_used),
+                        "asset_id": asset_filter,
+                        "message_id": history_record.id if history_record else None,
+                    }
+                    yield json.dumps(payload) + "\n"
 
         return StreamingResponse(event_stream(), media_type="application/json")
 
-    answer = answer_result
+    if no_answer_from_docs:
+        response_time_ms = int((time.perf_counter() - start_time) * 1000)
+        history_record = await chat_history_model.create_history(
+            user_id=current_user.id,
+            conversation_id=conversation.conversation_id,
+            prompt=search_request.text,
+            answer=fallback_answer,
+            model_key=model_key_used,
+            doc_types=history_filter or ["all"],
+            response_time_ms=response_time_ms,
+            fallback_used=True,
+            retrieved_chunks=retrieved_chunks_count,
+            retrieved_doc_types=retrieved_doc_types or None,
+            retrieved_asset_ids=retrieved_asset_ids or None,
+        )
+        await conversation_model.touch_conversation(conversation.conversation_id)
 
+        return JSONResponse(
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
+                "answer": fallback_answer,
+                "full_prompt": None,
+                "chat_history": [],
+                "conversation_id": conversation.conversation_id,
+                "conversation_title": conversation.conversation_title,
+                "document_types": history_filter or ["all"],
+                "model": model_key_used,
+                "model_id": generation_models.get(model_key_used),
+                "asset_id": asset_filter,
+                "message_id": history_record.id,
+            }
+        )
+
+    answer = answer_result
     if not answer:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -729,11 +930,7 @@ async def answer_rag(
 
     response_time_ms = int((time.perf_counter() - start_time) * 1000)
 
-    history_filter = doc_type_filter.copy() if doc_type_filter else []
-    if asset_filter is not None:
-        history_filter.append(f"asset:{asset_filter}")
-
-    await chat_history_model.create_history(
+    history_record = await chat_history_model.create_history(
         user_id=current_user.id,
         conversation_id=conversation.conversation_id,
         prompt=search_request.text,
@@ -741,6 +938,10 @@ async def answer_rag(
         model_key=model_key_used,
         doc_types=history_filter or ["all"],
         response_time_ms=response_time_ms,
+        fallback_used=False,
+        retrieved_chunks=retrieved_chunks_count,
+        retrieved_doc_types=retrieved_doc_types or None,
+        retrieved_asset_ids=retrieved_asset_ids or None,
     )
     await conversation_model.touch_conversation(conversation.conversation_id)
 
@@ -756,6 +957,7 @@ async def answer_rag(
             "model": model_key_used,
             "model_id": generation_models.get(model_key_used),
             "asset_id": asset_filter,
+            "message_id": history_record.id,
         }
     )
 
@@ -1041,5 +1243,123 @@ async def summarize_project(
             "full_prompt": full_prompt,
             "model": model_key_used,
             "model_id": model_id_used,
+        }
+    )
+
+
+@nlp_router.get("/summary")
+async def list_summaries(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+):
+    async with request.app.db_client() as session:
+        result = await session.execute(
+            select(SummaryRecord, Asset)
+            .outerjoin(Asset, SummaryRecord.asset_id == Asset.asset_id)
+            .where(SummaryRecord.user_id == current_user.id)
+            .order_by(SummaryRecord.created_at.desc())
+            .limit(limit)
+        )
+        rows = result.all()
+
+    summaries = []
+    for summary_record, asset in rows:
+        asset_name = None
+        asset_doc_type = None
+        if asset is not None:
+            asset_name = getattr(asset, "asset_name", None)
+            config = getattr(asset, "asset_config", None) or {}
+            original_name = config.get("original_filename")
+            asset_name = original_name or asset_name
+            asset_doc_type = getattr(asset, "asset_document_type", None)
+
+        payload = summary_record.request_payload or {}
+
+        summaries.append(
+            {
+                "summary_id": summary_record.summary_id,
+                "file_id": summary_record.asset_id,
+                "file_name": asset_name,
+                "doc_type": asset_doc_type,
+                "model": payload.get("model"),
+                "focus": payload.get("focus"),
+                "created_at": summary_record.created_at.isoformat()
+                if summary_record.created_at
+                else None,
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "summaries": summaries,
+            "total": len(summaries),
+        }
+    )
+
+
+@nlp_router.get("/summary/{summary_id}")
+async def get_summary(
+    request: Request,
+    summary_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    async with request.app.db_client() as session:
+        result = await session.execute(
+            select(SummaryRecord, Asset)
+            .outerjoin(Asset, SummaryRecord.asset_id == Asset.asset_id)
+            .where(SummaryRecord.summary_id == summary_id)
+        )
+        row = result.first()
+
+    if not row:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                "detail": f"Summary with id {summary_id} not found.",
+            },
+        )
+
+    summary_record, asset = row
+
+    # Only the summary owner or an admin can view the full summary.
+    if summary_record.user_id != getattr(current_user, "id", None) and not getattr(
+        current_user, "is_admin", False
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "You do not have access to this summary.",
+            },
+        )
+
+    asset_name = None
+    asset_doc_type = None
+    if asset is not None:
+        asset_name = getattr(asset, "asset_name", None)
+        config = getattr(asset, "asset_config", None) or {}
+        original_name = config.get("original_filename")
+        asset_name = original_name or asset_name
+        asset_doc_type = getattr(asset, "asset_document_type", None)
+
+    payload = summary_record.request_payload or {}
+
+    return JSONResponse(
+        content={
+            "summary_id": summary_record.summary_id,
+            "summary": summary_record.summary_text,
+            "file_id": summary_record.asset_id,
+            "file_name": asset_name,
+            "doc_type": asset_doc_type,
+            "model": payload.get("model"),
+            "focus": payload.get("focus"),
+            "max_chunks": payload.get("max_chunks"),
+            "max_output_tokens": payload.get("requested_max_output_tokens"),
+            "created_at": summary_record.created_at.isoformat()
+            if summary_record.created_at
+            else None,
+            "prompt_text": summary_record.prompt_text,
         }
     )

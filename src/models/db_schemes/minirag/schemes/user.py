@@ -11,6 +11,7 @@ class User(SQLAlchemyBase):
     is_admin = Column(Boolean, nullable=False, default=False)
     username = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
+    department = Column(String, nullable=False, default="Global")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
@@ -23,4 +24,5 @@ class User(SQLAlchemyBase):
 
     __table_args__ = (
         Index('ix_users_is_admin', is_admin),
+        Index('ix_users_department', department),
     )

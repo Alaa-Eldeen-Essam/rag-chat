@@ -217,8 +217,6 @@ class NLPController(BaseController):
                             asset_labels: Optional[Dict[int, str]] = None,
                             asset_labels_by_name: Optional[Dict[str, str]] = None):
         
-        answer_or_stream, full_prompt, chat_history = None, None, None
-
         # step1: retrieve related documents
         retrieved_documents = await self.search_vector_db_collection(
             project=project,
@@ -227,6 +225,26 @@ class NLPController(BaseController):
             doc_types=doc_types,
             asset_ids=asset_ids,
         )
+
+        return await self.generate_rag_answer_from_documents(
+            retrieved_documents=retrieved_documents or [],
+            query=query,
+            chat_messages=chat_messages,
+            stream=stream,
+            collector=collector,
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
+        )
+
+    async def generate_rag_answer_from_documents(self,
+                            retrieved_documents: List[Any],
+                            query: str,
+                            chat_messages: Optional[List[Dict[str, str]]] = None,
+                            stream: bool = False, collector: Optional[dict] = None,
+                            asset_labels: Optional[Dict[int, str]] = None,
+                            asset_labels_by_name: Optional[Dict[str, str]] = None):
+        
+        answer_or_stream, full_prompt, chat_history = None, None, None
 
         if not retrieved_documents or len(retrieved_documents) == 0:
             return answer_or_stream, full_prompt, chat_history

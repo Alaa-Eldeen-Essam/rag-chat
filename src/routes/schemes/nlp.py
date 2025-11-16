@@ -12,6 +12,7 @@ class SearchRequest(BaseModel):
     conversation_id: Optional[int] = None
     model: Optional[str] = None
     asset_id: Optional[int] = None
+    doc_type: Optional[str] = None
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None
@@ -20,3 +21,7 @@ class SummarizeRequest(BaseModel):
     focus: Optional[str] = None
     stream: Optional[bool] = True
     model: Optional[str] = None
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str

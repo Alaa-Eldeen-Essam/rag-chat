@@ -22,25 +22,41 @@ class AssetModel(BaseDataModel):
                     asset.asset_document_type = "general"
                 else:
                     asset.asset_document_type = asset.asset_document_type.strip().lower()
+                # Normalize visibility
+                visibility = (getattr(asset, "asset_visibility", None) or "private").strip().lower()
+                if visibility not in ("private", "department", "global"):
+                    visibility = "private"
+                asset.asset_visibility = visibility
                 session.add(asset)
             await session.commit()
             await session.refresh(asset)
         return asset
 
     def _can_user_access(self, asset: Asset, current_user) -> bool:
-        if asset.asset_is_private is False:
-            return True
-
         if current_user is None:
             return False
 
         if getattr(current_user, "is_admin", False):
             return True
 
-        if asset.asset_user_id is None:
+        # Owner always has access
+        if asset.asset_user_id == getattr(current_user, "id", None):
             return True
 
-        return asset.asset_user_id == getattr(current_user, "id", None)
+        visibility = getattr(asset, "asset_visibility", None) or (
+            "private" if getattr(asset, "asset_is_private", True) else "global"
+        )
+        visibility = visibility.lower()
+        asset_dept = getattr(asset, "asset_department", None)
+        user_dept = getattr(current_user, "department", None)
+
+        if visibility == "global":
+            return True
+        if visibility == "department" and asset_dept and user_dept:
+            return asset_dept == user_dept
+
+        # default / private
+        return False
 
     async def get_all_project_assets(self, asset_project_id: int, asset_type: str, current_user):
 
@@ -50,16 +66,23 @@ class AssetModel(BaseDataModel):
                 Asset.asset_type == asset_type
             )
 
-            if current_user and not getattr(current_user, "is_admin", False):
-                stmt = stmt.where(
-                    or_(
-                        Asset.asset_is_private.is_(False),
-                        Asset.asset_user_id == getattr(current_user, "id", None)
-                    )
-                )
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+
+        if current_user and not getattr(current_user, "is_admin", False):
+            return [a for a in records if self._can_user_access(a, current_user)]
+        return records
+
+    async def get_all_accessible_assets(self, asset_type: str, current_user):
+
+        async with self.db_client() as session:
+            stmt = select(Asset).where(Asset.asset_type == asset_type)
 
             result = await session.execute(stmt)
             records = result.scalars().all()
+
+        if current_user and not getattr(current_user, "is_admin", False):
+            return [a for a in records if self._can_user_access(a, current_user)]
         return records
 
     async def get_asset_record(self, asset_project_id: int, asset_name: str, current_user):

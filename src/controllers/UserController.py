@@ -20,7 +20,8 @@ class UserController(BaseController):
         )
         return user, ResponseSignal.USER_CREATED_SUCCESS.value
 
-    async def create_admin_user(self, user_model, requesting_user, username: str, password: str):
+    async def create_admin_user(self, user_model, requesting_user, username: str,
+                                password: str, department: str = "Global"):
         if not requesting_user or not requesting_user.is_admin:
             return None, ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
 
@@ -32,7 +33,8 @@ class UserController(BaseController):
         user = await user_model.create_user(
             username=username,
             password_hash=password_hash,
-            is_admin=True
+            is_admin=True,
+            department=department or "Global",
         )
         return user, ResponseSignal.ADMIN_CREATED_SUCCESS.value
 

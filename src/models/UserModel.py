@@ -14,13 +14,15 @@ class UserModel(BaseDataModel):
         instance = cls(db_client)
         return instance
 
-    async def create_user(self, username: str, password_hash: str, is_admin: bool = False):
+    async def create_user(self, username: str, password_hash: str, is_admin: bool = False,
+                          department: str = "Global"):
         async with self.db_client() as session:
             async with session.begin():
                 user = User(
                     username=username,
                     password_hash=password_hash,
                     is_admin=is_admin,
+                    department=department or "Global",
                 )
                 session.add(user)
             await session.commit()
@@ -54,3 +56,33 @@ class UserModel(BaseDataModel):
         if user_count and user_count > 0:
             return
         await self.create_user(username=username, password_hash=password_hash, is_admin=True)
+
+    async def update_department(self, user_id: int, department: str):
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(department=department)
+                )
+            await session.commit()
+
+    async def update_username(self, user_id: int, username: str):
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(username=username)
+                )
+            await session.commit()
+
+    async def reset_password(self, user_id: int, password_hash: str):
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(password_hash=password_hash)
+                )
+            await session.commit()

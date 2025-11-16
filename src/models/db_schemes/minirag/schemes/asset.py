@@ -21,6 +21,10 @@ class Asset(SQLAlchemyBase):
     asset_project_id = Column(Integer, ForeignKey("projects.project_id"), nullable=False)
     asset_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     asset_is_private = Column(Boolean, nullable=False, default=True)
+    # Visibility: "private" | "department" | "global"
+    asset_visibility = Column(String, nullable=False, default="private")
+    # Department for department-level visibility
+    asset_department = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
@@ -36,4 +40,6 @@ class Asset(SQLAlchemyBase):
         Index('ix_asset_document_type', asset_document_type),
         Index('ix_asset_user_id', asset_user_id),
         Index('ix_asset_is_private', asset_is_private),
+        Index('ix_asset_visibility', asset_visibility),
+        Index('ix_asset_department', asset_department),
     )

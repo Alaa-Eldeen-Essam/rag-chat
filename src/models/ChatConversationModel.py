@@ -75,6 +75,22 @@ class ChatConversationModel(BaseDataModel):
                 )
             await session.commit()
 
+    async def delete_conversation(self, conversation_id: int, user_id: int) -> bool:
+        async with self.db_client() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(ChatConversation).where(
+                        ChatConversation.conversation_id == conversation_id,
+                        ChatConversation.conversation_user_id == user_id,
+                    )
+                )
+                conversation = result.scalar_one_or_none()
+                if not conversation:
+                    return False
+                await session.delete(conversation)
+            await session.commit()
+        return True
+
     def _generate_conversation_title(self, initial_prompt: str) -> str:
         if not initial_prompt:
             return "New Conversation"
