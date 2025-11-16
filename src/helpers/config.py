@@ -22,7 +22,6 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: str = None
     OPENAI_API_URL: str = None
-    COHERE_API_KEY: str = None
 
     GENERATION_MODEL_ID: str = None
     BEST_GENERATION_MODEL_ID: str = None

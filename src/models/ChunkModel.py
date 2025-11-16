@@ -1,13 +1,13 @@
-from .BaseDataModel import BaseDataModel
-from .db_schemes import DataChunk
-from bson.objectid import ObjectId
-from pymongo import InsertOne
-from sqlalchemy.future import select
-from sqlalchemy import func, delete
 from typing import List, Optional
 
-class ChunkModel(BaseDataModel):
+from sqlalchemy import delete, func
+from sqlalchemy.future import select
 
+from .BaseDataModel import BaseDataModel
+from .db_schemes import DataChunk
+
+
+class ChunkModel(BaseDataModel):
     def __init__(self, db_client: object):
         super().__init__(db_client=db_client)
         self.db_client = db_client
@@ -18,7 +18,6 @@ class ChunkModel(BaseDataModel):
         return instance
 
     async def create_chunk(self, chunk: DataChunk):
-
         async with self.db_client() as session:
             async with session.begin():
                 session.add(chunk)
@@ -26,31 +25,31 @@ class ChunkModel(BaseDataModel):
             await session.refresh(chunk)
         return chunk
 
-    async def get_chunk(self, chunk_id: str):
-
+    async def get_chunk(self, chunk_id: int):
         async with self.db_client() as session:
-            result = await session.execute(select(DataChunk).where(DataChunk.chunk_id == chunk_id))
+            result = await session.execute(
+                select(DataChunk).where(DataChunk.chunk_id == chunk_id)
+            )
             chunk = result.scalar_one_or_none()
         return chunk
 
-    async def insert_many_chunks(self, chunks: list, batch_size: int=100):
-
+    async def insert_many_chunks(self, chunks: list, batch_size: int = 100):
         async with self.db_client() as session:
             async with session.begin():
                 for i in range(0, len(chunks), batch_size):
-                    batch = chunks[i:i+batch_size]
+                    batch = chunks[i : i + batch_size]
                     session.add_all(batch)
             await session.commit()
         return len(chunks)
 
-    async def delete_chunks_by_project_id(self, project_id: ObjectId):
+    async def delete_chunks_by_project_id(self, project_id: int):
         async with self.db_client() as session:
             stmt = delete(DataChunk).where(DataChunk.chunk_project_id == project_id)
             result = await session.execute(stmt)
             await session.commit()
         return result.rowcount
 
-    async def delete_chunks_by_asset_ids(self, asset_ids: list[int]):
+    async def delete_chunks_by_asset_ids(self, asset_ids: List[int]):
         if not asset_ids:
             return 0
         async with self.db_client() as session:
@@ -58,29 +57,41 @@ class ChunkModel(BaseDataModel):
             result = await session.execute(stmt)
             await session.commit()
         return result.rowcount
-    
-    async def get_poject_chunks(self, project_id: ObjectId, page_no: int=1, page_size: int=50, asset_id: int=None):
+
+    async def get_poject_chunks(
+        self,
+        project_id: int,
+        page_no: int = 1,
+        page_size: int = 50,
+        asset_id: Optional[int] = None,
+    ):
         async with self.db_client() as session:
             stmt = select(DataChunk).where(DataChunk.chunk_project_id == project_id)
-            if asset_id:
+            if asset_id is not None:
                 stmt = stmt.where(DataChunk.chunk_asset_id == asset_id)
             stmt = stmt.offset((page_no - 1) * page_size).limit(page_size)
             result = await session.execute(stmt)
             records = result.scalars().all()
         return records
-    
-    async def get_project_chunks_for_summary(self, project_id: ObjectId, asset_id: int=None, asset_ids: Optional[List[int]] = None, limit: int=None):
+
+    async def get_project_chunks_for_summary(
+        self,
+        project_id: int,
+        asset_id: Optional[int] = None,
+        asset_ids: Optional[List[int]] = None,
+        limit: Optional[int] = None,
+    ):
         async with self.db_client() as session:
             stmt = select(DataChunk).where(DataChunk.chunk_project_id == project_id)
 
             if asset_ids:
                 stmt = stmt.where(DataChunk.chunk_asset_id.in_(asset_ids))
-            elif asset_id:
+            elif asset_id is not None:
                 stmt = stmt.where(DataChunk.chunk_asset_id == asset_id)
 
             stmt = stmt.order_by(
                 DataChunk.chunk_asset_id.asc(),
-                DataChunk.chunk_order.asc()
+                DataChunk.chunk_order.asc(),
             )
 
             if limit:
@@ -89,44 +100,45 @@ class ChunkModel(BaseDataModel):
             result = await session.execute(stmt)
             records = result.scalars().all()
         return records
-    
-    async def get_total_chunks_count(self, project_id: ObjectId, asset_id: int=None):
-        total_count = 0
+
+    async def get_total_chunks_count(
+        self,
+        project_id: int,
+        asset_id: Optional[int] = None,
+    ) -> int:
         async with self.db_client() as session:
-            count_sql = select(func.count(DataChunk.chunk_id)).where(DataChunk.chunk_project_id == project_id)
-            if asset_id:
+            count_sql = select(func.count(DataChunk.chunk_id)).where(
+                DataChunk.chunk_project_id == project_id
+            )
+            if asset_id is not None:
                 count_sql = count_sql.where(DataChunk.chunk_asset_id == asset_id)
             records_count = await session.execute(count_sql)
             total_count = records_count.scalar()
 
-        return total_count
+        return int(total_count or 0)
 
-    async def get_chunk_ids_by_asset_ids(self, asset_ids: list[int]) -> list[int]:
+    async def get_chunk_ids_by_asset_ids(self, asset_ids: List[int]) -> List[int]:
         if not asset_ids:
             return []
 
         async with self.db_client() as session:
-            stmt = select(DataChunk.chunk_id).where(DataChunk.chunk_asset_id.in_(asset_ids))
+            stmt = select(DataChunk.chunk_id).where(
+                DataChunk.chunk_asset_id.in_(asset_ids)
+            )
             result = await session.execute(stmt)
-            chunk_ids = [record for record, in result.all()]
+            chunk_ids = [record for (record,) in result.all()]
+
         return chunk_ids
 
-    async def get_chunks_by_ids(self, chunk_ids: list[int]) -> list[DataChunk]:
+    async def get_chunks_by_ids(self, chunk_ids: List[int]) -> List[DataChunk]:
         if not chunk_ids:
             return []
 
         async with self.db_client() as session:
-            stmt = select(DataChunk).where(DataChunk.chunk_id.in_(chunk_ids)).order_by(DataChunk.chunk_id.asc())
+            stmt = (
+                select(DataChunk)
+                .where(DataChunk.chunk_id.in_(chunk_ids))
+                .order_by(DataChunk.chunk_id.asc())
+            )
             result = await session.execute(stmt)
             return result.scalars().all()
-
-    async def get_chunk_ids_by_asset_ids(self, asset_ids: list[int]) -> list[int]:
-        if not asset_ids:
-            return []
-
-        async with self.db_client() as session:
-            stmt = select(DataChunk.chunk_id).where(DataChunk.chunk_asset_id.in_(asset_ids))
-            result = await session.execute(stmt)
-            chunk_ids = [record for record, in result.all()]
-
-        return chunk_ids

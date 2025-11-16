@@ -23,7 +23,7 @@ from tqdm.auto import tqdm
 import logging
 import json
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 DetectorFactory.seed = 0
 
@@ -769,6 +769,72 @@ async def answer_rag(
 
     no_answer_from_docs = answer_result is None and (full_prompt is None or chat_history is None)
 
+    def build_sources(max_sources: int = 5) -> List[Dict[str, str]]:
+        sources: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        if not retrieved_documents:
+            return sources
+
+        for idx, doc in enumerate(retrieved_documents):
+            text = getattr(doc, "text", "") or ""
+            metadata = getattr(doc, "metadata", None)
+            meta_dict: Dict[str, Any] = {}
+            if isinstance(metadata, dict):
+                meta_dict = metadata
+            elif metadata is not None and hasattr(metadata, "dict"):
+                try:
+                    maybe = metadata.dict()  # type: ignore[call-arg]
+                    if isinstance(maybe, dict):
+                        meta_dict = maybe
+                except Exception:
+                    meta_dict = {}
+
+            asset_id_value = meta_dict.get("asset_id")
+            file_name = (
+                meta_dict.get("original_filename")
+                or meta_dict.get("source_name")
+                or (
+                    asset_label_lookup.get(int(asset_id_value))
+                    if asset_label_lookup and asset_id_value is not None
+                    else None
+                )
+                or f"Document {idx + 1}"
+            )
+
+            page = meta_dict.get("page") or meta_dict.get("page_number")
+            section = meta_dict.get("section") or meta_dict.get("heading")
+            if page is not None:
+                location = f"Page {page}"
+            elif section:
+                location = str(section)
+            else:
+                location = f"Excerpt {idx + 1}"
+
+            key = (str(file_name), location)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            snippet = text.strip().replace("\n", " ")
+            if len(snippet) > 280:
+                snippet = snippet[:277] + "..."
+
+            sources.append(
+                {
+                    "file_name": str(file_name),
+                    "location": location,
+                    "snippet": snippet,
+                }
+            )
+
+            if len(sources) >= max_sources:
+                break
+
+        return sources
+
+    answer_sources = build_sources()
+
     def compose_final_answer(store: dict) -> str:
         output_text = "".join(store.get("output", [])) if store else ""
         reasoning_text = "".join(store.get("reasoning", [])) if store else ""
@@ -836,6 +902,7 @@ async def answer_rag(
                     "model_id": generation_models.get(model_key_used),
                     "asset_id": asset_filter,
                     "message_id": history_record.id,
+                    "sources": [],
                 }
                 yield json.dumps(payload) + "\n"
             else:
@@ -888,6 +955,7 @@ async def answer_rag(
                         "model_id": generation_models.get(model_key_used),
                         "asset_id": asset_filter,
                         "message_id": history_record.id if history_record else None,
+                        "sources": answer_sources,
                     }
                     yield json.dumps(payload) + "\n"
 
@@ -923,6 +991,7 @@ async def answer_rag(
                 "model_id": generation_models.get(model_key_used),
                 "asset_id": asset_filter,
                 "message_id": history_record.id,
+                "sources": [],
             }
         )
 
@@ -967,6 +1036,7 @@ async def answer_rag(
             "model_id": generation_models.get(model_key_used),
             "asset_id": asset_filter,
             "message_id": history_record.id,
+            "sources": answer_sources,
         }
     )
 
