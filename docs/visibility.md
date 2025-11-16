@@ -69,3 +69,13 @@ Each user effectively has their own primary project id (`defaultProjectId = user
 
 Backend helper methods (e.g. `get_all_accessible_assets`) enforce visibility rules and return the list of accessible assets for the current user. The RAG endpoint then searches across those assets, grouped by project, so global and department-visible content is available even if it was uploaded under another user’s project.
 
+## OCR-Derived Content
+
+When a file is ingested, the system first tries normal text extraction. If it detects that a PDF contains little or no text, or if the file is an image, it may run OCR (Tesseract) to extract text instead. This does **not** change the asset’s visibility: the same `asset_visibility` / `asset_department` rules apply to OCR-derived chunks.
+
+Chunks produced via OCR are marked in their metadata, which you may see in internal tools:
+
+- `ocr_used: true` – the text for this chunk came from OCR rather than a native text layer.
+- `ocr_lang: "eng+ara"` (or similar) – which Tesseract languages were used.
+
+These flags are informational only; they do not affect who can access the chunk, only how the content was obtained.

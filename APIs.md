@@ -181,7 +181,7 @@ Authorization: Basic base64("username:password")
   - `is_private` (bool, default `true`), `doc_type` (string)
   - `visibility` (string, default `"private"`): `"private" | "department" | "global"`.
   - `department` (optional string): department override used when `visibility="department"`.
-- **Description:** Convenience endpoint that uploads a file, processes it into chunks, stores those chunks in Postgres, and immediately indexes them into the configured vector DB (pgvector or Qdrant). If vector indexing fails, it rolls back the asset/chunks and returns an error signal.
+- **Description:** Convenience endpoint that uploads a file, processes it into chunks, stores those chunks in Postgres, and immediately indexes them into the configured vector DB (pgvector). If vector indexing fails, it rolls back the asset/chunks and returns an error signal.
 - **Success response:**
 ```json
 {
@@ -231,11 +231,11 @@ Authorization: Basic base64("username:password")
   "asset_name": "uw8fanbg0a1a_AlaaEldeen1.pdf"
 }
 ```
-- **Description:** Streams processed chunks into the configured vector DB (pgvector/Qdrant). When `asset_name` is provided, only that stored file is indexed; otherwise the entire project is re-indexed. Setting `do_reset=1` drops and recreates the collection before inserting (use with care if you’re targeting a single file).
+- **Description:** Streams processed chunks into the configured vector DB (pgvector). When `asset_name` is provided, only that stored file is indexed; otherwise the entire project is re-indexed. Setting `do_reset=1` drops and recreates the collection before inserting (use with care if you’re targeting a single file).
 - **Response:** `insert_into_vectordb_success` plus `inserted_items_count`.
 
 ### GET `/index/info/{project_id}`
-- Returns Qdrant collection metadata (vector size, record counts, etc.) with `vectordb_collection_retrieved` signal.
+- Returns vector collection metadata (vector size, record counts, etc.) with `vectordb_collection_retrieved` signal.
 
 ### POST `/index/search/{project_id}`
 - **Body (`SearchRequest`):**

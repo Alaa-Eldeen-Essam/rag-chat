@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     VECTOR_DB_DISTANCE_METHOD: str = None
     VECTOR_DB_PGVEC_INDEX_THRESHOLD: int = 100
 
+    # OCR / Tesseract configuration
+    OCR_ENABLED: bool = False
+    OCR_LANGS: str = "eng+ara"
+    OCR_MAX_PAGES: int | None = None
+    OCR_DPI: int | None = 300
+
 
     PRIMARY_LANG: str = "en"
     DEFAULT_LANG: str = "en"

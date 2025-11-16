@@ -1,11 +1,13 @@
+from dataclasses import dataclass
+import os
+from typing import List, Optional
+
+from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
+
 from .BaseController import BaseController
 from .ProjectController import ProjectController
-import os
-from langchain_community.document_loaders import TextLoader
-from langchain_community.document_loaders import PyMuPDFLoader
+from helpers.ocr import ocr_image_file, ocr_pdf_file
 from models import ProcessingEnum
-from typing import List
-from dataclasses import dataclass
 
 @dataclass
 class Document:
@@ -25,10 +27,7 @@ class ProcessController(BaseController):
     def get_file_loader(self, file_id: str):
 
         file_ext = self.get_file_extension(file_id=file_id)
-        file_path = os.path.join(
-            self.project_path,
-            file_id
-        )
+        file_path = os.path.join(self.project_path, file_id)
 
         if not os.path.exists(file_path):
             return None
@@ -38,16 +37,87 @@ class ProcessController(BaseController):
 
         if file_ext == ProcessingEnum.PDF.value:
             return PyMuPDFLoader(file_path)
-        
+
         return None
+
+    def _should_fallback_to_ocr(self, docs: Optional[list]) -> bool:
+        """
+        Decide if OCR should be used based on extracted text length.
+        """
+        if not getattr(self.app_settings, "OCR_ENABLED", False):
+            return False
+        if not docs:
+            return True
+
+        total_text = "".join(
+            getattr(rec, "page_content", "") or "" for rec in docs
+        ).strip()
+        # If we extracted almost nothing, let OCR try.
+        return len(total_text) < 200
 
     def get_file_content(self, file_id: str):
+        """
+        Load file content as a list of Document‑like objects.
+
+        - TXT/PDF: use existing loaders first.
+        - Images: use OCR directly.
+        - PDFs with little/no text: fall back to page‑by‑page OCR when enabled.
+        """
+        file_ext = (self.get_file_extension(file_id=file_id) or "").lower()
+        file_path = os.path.join(self.project_path, file_id)
+
+        if not os.path.exists(file_path):
+            return None
 
         loader = self.get_file_loader(file_id=file_id)
-        if loader:
-            return loader.load()
+        docs = loader.load() if loader else None
 
-        return None
+        # If OCR is disabled, keep existing behavior.
+        if not getattr(self.app_settings, "OCR_ENABLED", False):
+            # For images, there was no loader before, so we also keep behavior (no content).
+            return docs
+
+        # Always run OCR for images.
+        image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"}
+        if file_ext in image_exts:
+            text = ocr_image_file(file_path, lang=self.app_settings.OCR_LANGS)
+            if not text.strip():
+                return None
+            return [
+                Document(
+                    page_content=text.strip(),
+                    metadata={
+                        "ocr_used": True,
+                        "ocr_lang": self.app_settings.OCR_LANGS,
+                    },
+                )
+            ]
+
+        # For PDFs: try normal extraction, then fall back to OCR if needed.
+        if file_ext == ProcessingEnum.PDF.value:
+            if not self._should_fallback_to_ocr(docs):
+                return docs
+
+            ocr_results = ocr_pdf_file(
+                path=file_path,
+                lang=self.app_settings.OCR_LANGS,
+                max_pages=self.app_settings.OCR_MAX_PAGES,
+                dpi=self.app_settings.OCR_DPI or 300,
+            )
+            if not ocr_results:
+                # If OCR fails or returns nothing, keep whatever we had.
+                return docs
+
+            ocr_docs = [
+                Document(
+                    page_content=text,
+                    metadata=metadata,
+                )
+                for (text, metadata) in ocr_results
+            ]
+            return ocr_docs
+
+        return docs
 
     def process_file_content(self, file_content: list, file_id: str,
                             chunk_size: int=1200, overlap_size: int=250):
@@ -75,31 +145,56 @@ class ProcessController(BaseController):
 
         return chunks
 
-    def process_simpler_splitter(self, texts: List[str], metadatas: List[dict], chunk_size: int, splitter_tag: str="\n"):
+    def process_simpler_splitter(
+        self,
+        texts: List[str],
+        metadatas: List[dict],
+        chunk_size: int,
+        splitter_tag: str = "\n",
+    ):
+        """
+        Simple character‑based splitter that now preserves basic metadata.
 
-        full_text = " ".join(texts)
+        For OCR‑derived content, this means `ocr_used` / `ocr_lang` flags will be
+        propagated into the resulting chunks.
+        """
+        if not metadatas or len(metadatas) != len(texts):
+            metadatas = [{} for _ in texts]
 
-        # split by splitter_tag
-        lines = [ doc.strip() for doc in full_text.split(splitter_tag) if len(doc.strip()) > 1 ]
-
-        chunks = []
+        chunks: List[Document] = []
         current_chunk = ""
+        current_meta: dict = {}
 
-        for line in lines:
-            current_chunk += line + splitter_tag
-            if len(current_chunk) >= chunk_size:
-                chunks.append(Document(
+        for text, meta in zip(texts, metadatas):
+            # split by splitter_tag
+            lines = [
+                doc.strip()
+                for doc in (text or "").split(splitter_tag)
+                if len(doc.strip()) > 1
+            ]
+
+            for line in lines:
+                if not current_chunk:
+                    current_meta = meta or {}
+
+                current_chunk += line + splitter_tag
+                if len(current_chunk) >= chunk_size:
+                    chunks.append(
+                        Document(
+                            page_content=current_chunk.strip(),
+                            metadata=current_meta or {},
+                        )
+                    )
+                    current_chunk = ""
+                    current_meta = {}
+
+        if current_chunk:
+            chunks.append(
+                Document(
                     page_content=current_chunk.strip(),
-                    metadata={}
-                ))
-
-                current_chunk = ""
-
-        if len(current_chunk) >= 0:
-            chunks.append(Document(
-                page_content=current_chunk.strip(),
-                metadata={}
-            ))
+                    metadata=current_meta or {},
+                )
+            )
 
         return chunks
     
