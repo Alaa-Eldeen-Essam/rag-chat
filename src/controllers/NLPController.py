@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from .BaseController import BaseController
@@ -7,6 +8,39 @@ from models.db_schemes import DataChunk, Project
 from stores.llm.LLMEnums import DocumentTypeEnum
 
 logger = logging.getLogger(__name__)
+
+# Basic Arabic month names for simple date extraction.
+AR_MONTHS_PATTERN = (
+    "يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|"
+    "أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر"
+)
+
+# Basic English month names for simple date extraction.
+EN_MONTHS_PATTERN = (
+    "January|February|March|April|May|June|July|August|September|October|November|December|"
+    "Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+)
+
+# Match patterns like:
+# - "2 ديسمبر 2021"
+# - "2\nديسمبر2021"
+# - "December 2, 2021"
+# - "2 December 2021"
+DATE_REGEX = re.compile(
+    rf"("
+    rf"\d{{1,2}}\D{{0,7}}(?:{AR_MONTHS_PATTERN}|{EN_MONTHS_PATTERN})\D{{0,7}}\d{{4}}"
+    rf"|"
+    rf"(?:{AR_MONTHS_PATTERN}|{EN_MONTHS_PATTERN})\D{{0,7}}\d{{4}}"
+    rf")"
+)
+
+# Maximum number of evidence chunks to send to the LLM for a single answer.
+EVIDENCE_DOC_LIMIT = 5
+
+# Approximate character budget for all evidence text passed to the LLM for
+# a single answer. This helps keep prompts focused and reduces hallucination
+# risk on very long documents.
+EVIDENCE_CHAR_BUDGET = 4000
 
 class NLPController(BaseController):
 
@@ -54,6 +88,52 @@ class NLPController(BaseController):
                 return meta_dict
 
         return None
+
+    def _detect_question_type(self, query: str) -> str:
+        """
+        Very lightweight question type detector for Arabic and English.
+        Returns one of: 'when', 'why', 'where', 'who', 'how_many', or ''.
+        """
+        if not query:
+            return ""
+
+        q = (query or "").strip().lower()
+
+        # Basic Arabic / English "when" markers.
+        if "متى" in q or q.startswith("when "):
+            return "when"
+
+        # Basic Arabic / English "why" markers, including common rephrasings.
+        if (
+            "لماذا" in q
+            or "لماذا لم" in q
+            or q.startswith("why ")
+            or "ما سبب" in q
+            or "ما هو سبب" in q
+            or "ما هي أسباب" in q
+            or "ما الاسباب" in q
+            or "ما الأسباب" in q
+            or "ما الذي دفع" in q
+            or "what is the reason" in q
+            or "what's the reason" in q
+            or "what is the cause" in q
+            or "what caused" in q
+        ):
+            return "why"
+
+        # Basic "where" markers.
+        if "أين" in q or q.startswith("where "):
+            return "where"
+
+        # Basic "who" markers.
+        if "من " in q or q.startswith("who "):
+            return "who"
+
+        # Basic "how many" markers (numeric questions).
+        if "كم " in q or "how many" in q:
+            return "how_many"
+
+        return ""
 
     def _normalize_label_value(self, value: str) -> str:
         label = (value or "").strip()
@@ -135,9 +215,15 @@ class NLPController(BaseController):
 
         return True
 
-    async def search_vector_db_collection(self, project: Project, text: str, limit: int = 10,
-                                    doc_types: Optional[List[str]] = None,
-                                    asset_ids: Optional[List[int]] = None):
+    async def search_vector_db_collection(
+        self,
+        project: Project,
+        text: str,
+        limit: int = 10,
+        doc_types: Optional[List[str]] = None,
+        asset_ids: Optional[List[int]] = None,
+        keywords: Optional[List[str]] = None,
+    ):
 
         # step1: get collection name
         query_vector = None
@@ -204,11 +290,238 @@ class NLPController(BaseController):
                         continue
 
             if filtered_results:
-                return filtered_results
-            return []
+                results = filtered_results
+            else:
+                return []
+
+        # Optional keyword / lexical filtering: keep hits that contain at least
+        # one of the query keywords, if provided.
+        if keywords:
+            normalized_keywords = [kw.strip().lower() for kw in keywords if kw and kw.strip()]
+            if normalized_keywords:
+                filtered_results = []
+                for result in results:
+                    text_value = getattr(result, "text", "") or ""
+                    t_lower = text_value.lower()
+                    if any(kw in t_lower for kw in normalized_keywords):
+                        filtered_results.append(result)
+
+                if filtered_results:
+                    results = filtered_results
 
         return results
-    
+
+    def _try_extract_direct_answer(self, query: str, documents: List[Any], question_type: str) -> Optional[str]:
+        """
+        Lightweight, retrieval-side extraction of very simple factual answers
+        (dates, simple purposes) from the retrieved documents before passing
+        everything to the LLM. Intended to be language-agnostic for Arabic
+        and English where possible.
+        """
+        if not query or not documents or not question_type:
+            return None
+
+        corpus = "\n".join(
+            (getattr(doc, "text", "") or "") for doc in documents
+        )
+        if not corpus:
+            return None
+
+        if question_type == "when":
+            match = DATE_REGEX.search(corpus)
+            if match:
+                candidate = match.group(1).strip()
+                if candidate:
+                    return candidate
+            return None
+
+        if question_type == "why":
+            # Split corpus into coarse sentences.
+            sentences = re.split(r"[\.!\?؟\n]+", corpus)
+
+            def normalize_arabic(text: str) -> str:
+                """Light normalization to make OCR variants more robust."""
+                # Strip diacritics and tatweel
+                text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
+                # Normalize common alef forms and taa marbuta / ya
+                text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+                text = text.replace("ى", "ي").replace("ة", "ه")
+                # Collapse whitespace
+                text = re.sub(r"\s+", " ", text)
+                return text
+
+            # Travel-related verbs / phrases (normalized Arabic + English).
+            travel_keywords = [
+                "سافر", "ذهب", "توجه", "زار", "رحل",  # Arabic verbs
+                "سفر", "زيارة",
+                "traveled", "travelled", "went", "visited", "journeyed",
+            ]
+
+            # Purpose pattern: "ل" + 2–8 Arabic letters, then a meeting-like noun.
+            purpose_pattern = re.compile(
+                r"(ل[اأإآبتثجحخدذرزسشصضطظعغفقكلمنهوي]{2,8}\s*"
+                r"(?:اجتماع|اجتماعا|مؤتمر|قمة|لقاء|meeting|summit|conference))",
+                flags=re.IGNORECASE,
+            )
+
+            # Basic purpose triggers as a fallback matcher (more general).
+            triggers = [
+                # Arabic purpose / cause markers (normalized)
+                "لحضور", "لحض", "للمشاركة", "لتقديم", "للتفاوض", "لعقد",
+                "من اجل", "بهدف", "لان", "لأن", "بسبب", "نتيجه", "نتيجة",
+                # English purpose / cause markers
+                "to attend", "in order to", "for the purpose of",
+                "because", "because of", "due to", "as a result of",
+            ]
+
+            lowered_query = (query or "").lower()
+            normalized_query = normalize_arabic(lowered_query)
+
+            # Ignore generic question words.
+            stop_tokens = {"لماذا", "why", "?", "؟"}
+            query_tokens = [
+                tok
+                for tok in re.findall(r"\w+", normalized_query, flags=re.UNICODE)
+                if tok not in stop_tokens and len(tok) > 2
+            ]
+
+            # First pass: pattern-based extraction bound to travel + query context.
+            for sent in sentences:
+                s = sent.strip()
+                if not s:
+                    continue
+
+                low = s.lower()
+                norm = normalize_arabic(low)
+
+                # Require at least one travel-related keyword.
+                if not any(tv in norm for tv in travel_keywords):
+                    continue
+
+                # Prefer sentences that share some tokens with the query.
+                if query_tokens and not any(tok in norm for tok in query_tokens):
+                    continue
+
+                # Look for an explicit "ل + noun/verb" purpose fragment.
+                m = purpose_pattern.search(low)
+                if m:
+                    start = m.start()
+                    # Extract until the next major punctuation mark.
+                    tail = s[start:]
+                    p = re.search(r"[\.!\?؟]", tail)
+                    end = start + p.start() if p else len(s)
+                    reason_fragment = s[start:end].strip()
+                    if reason_fragment:
+                        return reason_fragment
+
+            # Fallback: trigger-based sentence scoring (legacy behavior, but
+            # using normalized text for robustness).
+            best_sentence = None
+            for sent in sentences:
+                s = sent.strip()
+                if not s:
+                    continue
+                low = s.lower()
+                norm = normalize_arabic(low)
+                if any(trigger in norm for trigger in triggers):
+                    # Prefer sentences that share some tokens with the query.
+                    if query_tokens and any(tok in norm for tok in query_tokens):
+                        best_sentence = s
+                        break
+                    if best_sentence is None:
+                        best_sentence = s
+
+            if best_sentence:
+                return best_sentence.strip()
+
+        if question_type == "where":
+            # Very lightweight extraction of a location-bearing sentence with
+            # simple scoring instead of first match, to reduce misfires.
+            sentences = re.split(r"[\.!\?؟\n]+", corpus)
+
+            def normalize_arabic(text: str) -> str:
+                text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
+                text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+                text = text.replace("ى", "ي").replace("ة", "ه")
+                text = re.sub(r"\s+", " ", text)
+                return text
+
+            lowered_query = (query or "").lower()
+            norm_query = normalize_arabic(lowered_query)
+            stop_tokens = {"اين", "أين", "where", "?", "؟"}
+            query_tokens = [
+                tok
+                for tok in re.findall(r"\w+", norm_query, flags=re.UNICODE)
+                if tok not in stop_tokens and len(tok) > 2
+            ]
+
+            location_markers = ["في ", "في-", "الى ", "إلى ", "near", " in ", " at ", " to "]
+
+            best_sentence = None
+            best_score = 0
+            for sent in sentences:
+                s = sent.strip()
+                if not s:
+                    continue
+                low = s.lower()
+                norm = normalize_arabic(low)
+
+                score = 0
+                if any(marker in norm for marker in location_markers):
+                    score += 1
+
+                overlap = 0
+                for tok in query_tokens:
+                    if tok in norm:
+                        overlap += 1
+                score += overlap
+
+                if score > best_score:
+                    best_score = score
+                    best_sentence = s
+
+            if best_sentence and best_score > 0:
+                return best_sentence.strip()
+
+        if question_type == "how_many":
+            # Simple numeric extraction: look for a sentence with a number and
+            # some overlap with the query, preferring higher overlap.
+            sentences = re.split(r"[\.!\?؟\n]+", corpus)
+            lowered_query = (query or "").lower()
+            stop_tokens = {"كم", "how", "many", "?", "؟"}
+            query_tokens = [
+                tok
+                for tok in re.findall(r"\w+", lowered_query, flags=re.UNICODE)
+                if tok not in stop_tokens and len(tok) > 2
+            ]
+
+            numeric_pattern = re.compile(r"\d+")
+
+            best_sentence = None
+            best_score = 0
+            for sent in sentences:
+                s = sent.strip()
+                if not s:
+                    continue
+                low = s.lower()
+                if not numeric_pattern.search(low):
+                    continue
+
+                overlap = 0
+                for tok in query_tokens:
+                    if tok in low:
+                        overlap += 1
+
+                if overlap > best_score:
+                    best_score = overlap
+                    best_sentence = s
+
+            if best_sentence and best_score > 0:
+                return best_sentence.strip()
+
+        # Other types could be added here (where, who) as needed.
+        return None
+
     async def answer_rag_question(self, project: Project, query: str, limit: int = 10,
                             chat_messages: Optional[List[Dict[str, str]]] = None,
                             stream: bool = False, collector: Optional[dict] = None,
@@ -216,15 +529,83 @@ class NLPController(BaseController):
                             asset_ids: Optional[List[int]] = None,
                             asset_labels: Optional[Dict[int, str]] = None,
                             asset_labels_by_name: Optional[Dict[str, str]] = None):
+
+        question_type = self._detect_question_type(query)
+
+        # Build an augmented retrieval query that incorporates recent
+        # conversation turns (if any) so that follow-up questions using
+        # pronouns like "هناك / there" still retrieve the right chunks.
+        retrieval_text = query or ""
+        if chat_messages:
+            parts: List[str] = []
+            for msg in chat_messages[-3:]:
+                prompt_part = (msg.get("prompt") or "").strip()
+                answer_part = (msg.get("answer") or "").strip()
+                if prompt_part:
+                    parts.append(prompt_part)
+                if answer_part:
+                    parts.append(answer_part)
+            if parts:
+                retrieval_text = "\n".join(parts + [query or ""])
         
         # step1: retrieve related documents
         retrieved_documents = await self.search_vector_db_collection(
             project=project,
-            text=query,
+            text=retrieval_text,
             limit=limit,
             doc_types=doc_types,
             asset_ids=asset_ids,
         )
+
+        direct_hint = self._try_extract_direct_answer(
+            query=query,
+            documents=retrieved_documents or [],
+            question_type=question_type,
+        )
+
+        # Try to resolve a human-readable label for the document that most
+        # likely contains the direct hint (e.g., original filename), so that
+        # we can say "according to <document>" instead of "according to the
+        # documents" in deterministic answers.
+        doc_label_for_hint: Optional[str] = None
+        if direct_hint and retrieved_documents:
+            chosen_doc = None
+            for doc in retrieved_documents:
+                text_value = getattr(doc, "text", "") or ""
+                if direct_hint in text_value:
+                    chosen_doc = doc
+                    break
+            if chosen_doc is None:
+                chosen_doc = retrieved_documents[0]
+
+            try:
+                doc_label_for_hint = self._resolve_document_label(
+                    getattr(chosen_doc, "metadata", None),
+                    fallback_label="Document 1",
+                )
+            except Exception:
+                doc_label_for_hint = None
+
+        # For clear "when / متى" questions where we can reliably extract a
+        # concrete date from the retrieved documents, short-circuit and answer
+        # directly rather than delegating to the LLM. This ensures deterministic
+        # behavior even when conversation history might bias the model toward
+        # "unknown" answers. For "why" questions we prefer to pass the hint into
+        # the LLM so it can clean up / enrich the answer.
+        if direct_hint and question_type == "when":
+            has_arabic = bool(re.search(r"[\u0600-\u06FF]", query or ""))
+            if doc_label_for_hint:
+                prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
+                prefix_en = f'According to the document "{doc_label_for_hint}", '
+            else:
+                prefix_ar = "وفقاً للمستندات، "
+                prefix_en = "According to the documents, "
+
+            if has_arabic:
+                answer_text = f"{prefix_ar}كان ذلك في {direct_hint}."
+            else:
+                answer_text = f"{prefix_en}this occurred on {direct_hint}."
+            return answer_text, None, None
 
         return await self.generate_rag_answer_from_documents(
             retrieved_documents=retrieved_documents or [],
@@ -234,6 +615,7 @@ class NLPController(BaseController):
             collector=collector,
             asset_labels=asset_labels,
             asset_labels_by_name=asset_labels_by_name,
+            direct_hint=direct_hint,
         )
 
     async def generate_rag_answer_from_documents(self,
@@ -242,18 +624,44 @@ class NLPController(BaseController):
                             chat_messages: Optional[List[Dict[str, str]]] = None,
                             stream: bool = False, collector: Optional[dict] = None,
                             asset_labels: Optional[Dict[int, str]] = None,
-                            asset_labels_by_name: Optional[Dict[str, str]] = None):
+                            asset_labels_by_name: Optional[Dict[str, str]] = None,
+                            direct_hint: Optional[str] = None):
         
         answer_or_stream, full_prompt, chat_history = None, None, None
 
         if not retrieved_documents or len(retrieved_documents) == 0:
             return answer_or_stream, full_prompt, chat_history
         
-        # step2: Construct LLM prompt
+        # step2: Select evidence documents and construct LLM prompt
         system_prompt = self.template_parser.get("rag", "system_prompt")
 
+        # Prefer a smaller set of evidence documents when we have a direct_hint,
+        # so the model focuses on the most relevant sentences instead of all
+        # retrieved context.
+        evidence_documents: List[Any] = list(retrieved_documents[:EVIDENCE_DOC_LIMIT])
+        if direct_hint and retrieved_documents:
+            def normalize_for_match(text: str) -> str:
+                t = (text or "").lower()
+                # Basic Arabic normalization + whitespace collapse.
+                t = re.sub(r"[ًٌٍَُِّْـ]", "", t)
+                t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+                t = t.replace("ى", "ي").replace("ة", "ه")
+                t = re.sub(r"\s+", " ", t)
+                return t.strip()
+
+            hint_norm = normalize_for_match(direct_hint)
+            docs_with_hint: List[Any] = []
+            for doc in retrieved_documents:
+                text_value = getattr(doc, "text", "") or ""
+                if not text_value:
+                    continue
+                if hint_norm and hint_norm in normalize_for_match(text_value):
+                    docs_with_hint.append(doc)
+            if docs_with_hint:
+                evidence_documents = docs_with_hint[:EVIDENCE_DOC_LIMIT]
+
         document_sections = []
-        for idx, doc in enumerate(retrieved_documents):
+        for idx, doc in enumerate(evidence_documents):
             chunk_text = self.generation_client.process_text(doc.text)
             doc_label = self._resolve_document_label(
                 getattr(doc, "metadata", None),
@@ -268,6 +676,14 @@ class NLPController(BaseController):
             document_sections.append(section)
 
         documents_prompts = "\n".join(document_sections)
+
+        hint_section = ""
+        if direct_hint:
+            hint_section = self.template_parser.get("rag", "hint_section", {
+                "hint": direct_hint,
+            }) or ("\n\n# Direct candidate answer extracted from documents:\n"
+                   f"{direct_hint}\n")
+            documents_prompts = documents_prompts + "\n" + hint_section
 
         footer_prompt = self.template_parser.get("rag", "footer_prompt", {
             "query": query

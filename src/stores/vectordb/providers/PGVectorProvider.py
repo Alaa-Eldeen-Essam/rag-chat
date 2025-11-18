@@ -175,13 +175,53 @@ class PGVectorProvider(VectorDBInterface):
                     return False
 
                 self.logger.info("START: Creating vector index for %s", collection_name)
+
+                # Determine effective index type. HNSW in pgvector has a hard limit
+                # of 2000 dimensions; for larger embeddings (e.g., 2560-dim models
+                # like Qwen3 Embedding 4B), fall back to IVFFLAT automatically.
+                effective_index_type = index_type
+                embedding_dim = None
+                try:
+                    # collection naming convention: collection_{dim}_{project_id}
+                    parts = collection_name.split("_")
+                    if len(parts) >= 3:
+                        embedding_dim = int(parts[1])
+                except Exception:
+                    embedding_dim = None
+
+                if embedding_dim is None:
+                    embedding_dim = self.default_vector_size
+
+                if (
+                    embedding_dim is not None
+                    and embedding_dim > 2000
+                    and effective_index_type == PgVectorIndexTypeEnums.HNSW.value
+                ):
+                    self.logger.info(
+                        "Embedding dimension %s exceeds HNSW limit; "
+                        "using IVFFLAT index for %s instead of HNSW",
+                        embedding_dim,
+                        collection_name,
+                    )
+                    effective_index_type = PgVectorIndexTypeEnums.IVFFLAT.value
+
                 index_name = self.default_index_name(collection_name)
-                create_idx_sql = sql_text(
-                    f'CREATE INDEX {index_name} ON {collection_name} '
-                    f'USING {index_type} '
-                    f'({PgVectorTableSchemeEnums.VECTOR.value} {self.distance_method})'
-                )
-                await session.execute(create_idx_sql)
+                try:
+                    create_idx_sql = sql_text(
+                        f'CREATE INDEX {index_name} ON {collection_name} '
+                        f'USING {effective_index_type} '
+                        f'({PgVectorTableSchemeEnums.VECTOR.value} {self.distance_method})'
+                    )
+                    await session.execute(create_idx_sql)
+                except Exception as exc:
+                    self.logger.error(
+                        "Failed to create vector index %s on %s: %s",
+                        index_name,
+                        collection_name,
+                        exc,
+                    )
+                    return False
+
                 self.logger.info("END: Created vector index for %s", collection_name)
 
         return True

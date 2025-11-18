@@ -453,6 +453,9 @@ async def submit_feedback(
         # Update fields and commit using the existing transaction
         if feedback.rating is not None:
             record.rating = feedback.rating
+        elif feedback.is_helpful is not None:
+            # Map simple helpful/unhelpful feedback into a 1–5 rating scale
+            record.rating = 5 if feedback.is_helpful else 1
         if feedback.is_helpful is not None:
             record.is_helpful = feedback.is_helpful
 

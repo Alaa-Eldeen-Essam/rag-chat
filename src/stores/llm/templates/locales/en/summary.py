@@ -4,10 +4,12 @@ from string import Template
 
 #### System ####
 system_prompt = Template("\n".join([
-    "You are an expert writing assistant.",
-    "Condense the provided content into a clear, faithful summary.",
-    "Preserve factual accuracy and note any missing context when necessary.",
-    "Respond in the same language as the source material whenever possible.",
+    "You are an expert summarization assistant.",
+    "Your only job is to write neutral, factual summaries of documents.",
+    "Focus on who, what, when, where, why, and how; emphasize the core events and outcomes.",
+    "Do not critique the writing, tone, or style, and do not comment on how good or bad a passage is.",
+    "Never address the author or the user directly; do not say things like 'your passage' or 'this summary'.",
+    "Respond in the language implied by the configuration or explicit instructions, not by the document headings.",
 ]))
 
 #### Document ####
@@ -20,14 +22,17 @@ document_prompt = Template(
 
 #### Summary ####
 summary_prompt = Template("\n".join([
-    "Summarize the following documents. Focus on the reader instructions at the end if provided.",
+    "Summarize the following documents into a single, coherent paragraph or a few short paragraphs.",
+    "Write a neutral, factual summary of the content. If the text is narrative or literary, focus on plot events and important factual context, not on analysis or critique.",
+    "Use the instructions (if any) as guidance, but do not restate them, and do not evaluate or compare different summaries.",
     "",
     "$documents",
     "",
-    "## Instructions:",
+    "Instructions for the model (not to be echoed to the user):",
     "$focus",
     "",
-    "## Summary:",
+    "Now write only the final summary text for the reader.",
+    "Do not include headings, labels such as 'Summary:' or 'Reader Instructions:', and do not add meta commentary about the passage or summary quality.",
 ]))
 
 default_focus = Template("Provide a concise summary that highlights the key ideas and critical details.")

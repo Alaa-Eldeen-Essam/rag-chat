@@ -1,5 +1,7 @@
-from dataclasses import dataclass
 import os
+import re
+import unicodedata
+from dataclasses import dataclass
 from typing import List, Optional
 
 from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
@@ -42,7 +44,7 @@ class ProcessController(BaseController):
 
     def _should_fallback_to_ocr(self, docs: Optional[list]) -> bool:
         """
-        Decide if OCR should be used based on extracted text length.
+        Decide if OCR should be used based on extracted text length and quality.
         """
         if not getattr(self.app_settings, "OCR_ENABLED", False):
             return False
@@ -52,8 +54,36 @@ class ProcessController(BaseController):
         total_text = "".join(
             getattr(rec, "page_content", "") or "" for rec in docs
         ).strip()
+
         # If we extracted almost nothing, let OCR try.
-        return len(total_text) < 200
+        if len(total_text) < 200:
+            return True
+
+        # Heuristic for "gibberish" text:
+        # If only a small fraction of characters are readable letters/digits/whitespace
+        # (e.g., encoded glyphs from PDFs), treat it as no usable text and fall back to OCR.
+        # To keep it fast, only sample the first few thousand characters.
+        sample = total_text[:4000]
+        if not sample:
+            return True
+
+        readable_chars = 0
+        for ch in sample:
+            # Count letters, numbers, and whitespace from any script as "readable"
+            if ch.isspace():
+                readable_chars += 1
+                continue
+            cat = unicodedata.category(ch)
+            if cat.startswith("L") or cat.startswith("N"):
+                readable_chars += 1
+
+        ratio = readable_chars / len(sample)
+
+        # If less than ~50% of characters look readable, assume the text layer is garbage.
+        if ratio < 0.5:
+            return True
+
+        return False
 
     def get_file_content(self, file_id: str):
         """
@@ -119,28 +149,43 @@ class ProcessController(BaseController):
 
         return docs
 
-    def process_file_content(self, file_content: list, file_id: str,
-                            chunk_size: int=1200, overlap_size: int=250):
+    def process_file_content(
+        self,
+        file_content: list,
+        file_id: str,
+        chunk_size: int = 900,
+        overlap_size: int = 300,
+    ):
+        """
+        Turn raw file pages into sentence-like segments first, then group them
+        into chunks of approximately `chunk_size` characters with optional
+        overlap. This makes it more likely that key facts (dates, places, names)
+        stay together inside at least one chunk.
+        """
 
-        file_content_texts = [
-            rec.page_content
-            for rec in file_content
-        ]
+        sentence_texts: List[str] = []
+        sentence_metas: List[dict] = []
 
-        file_content_metadata = [
-            rec.metadata
-            for rec in file_content
-        ]
+        for rec in file_content:
+            text = getattr(rec, "page_content", "") or ""
+            meta = getattr(rec, "metadata", {}) or {}
 
-        # chunks = text_splitter.create_documents(
-        #     file_content_texts,
-        #     metadatas=file_content_metadata
-        # )
+            # Split into sentence-ish segments using punctuation and newlines.
+            parts = re.split(r'(?<=[\.\!\؟\!؟])\s+|\n+', text)
+            for s in parts:
+                s = (s or "").strip()
+                if len(s) > 1:
+                    sentence_texts.append(s)
+                    sentence_metas.append(meta)
+
+        if not sentence_texts:
+            return []
 
         chunks = self.process_simpler_splitter(
-            texts=file_content_texts,
-            metadatas=file_content_metadata,
+            texts=sentence_texts,
+            metadatas=sentence_metas,
             chunk_size=chunk_size,
+            overlap_size=overlap_size,
         )
 
         return chunks
@@ -150,10 +195,12 @@ class ProcessController(BaseController):
         texts: List[str],
         metadatas: List[dict],
         chunk_size: int,
+        overlap_size: int = 0,
         splitter_tag: str = "\n",
     ):
         """
-        Simple character‑based splitter that now preserves basic metadata.
+        Sentence-oriented splitter with character-based size and overlap,
+        preserving basic metadata.
 
         For OCR‑derived content, this means `ocr_used` / `ocr_lang` flags will be
         propagated into the resulting chunks.
@@ -162,36 +209,52 @@ class ProcessController(BaseController):
             metadatas = [{} for _ in texts]
 
         chunks: List[Document] = []
-        current_chunk = ""
+        current_sentences: List[str] = []
         current_meta: dict = {}
+        current_len = 0
 
         for text, meta in zip(texts, metadatas):
-            # split by splitter_tag
-            lines = [
-                doc.strip()
-                for doc in (text or "").split(splitter_tag)
-                if len(doc.strip()) > 1
-            ]
+            s = (text or "").strip()
+            if len(s) <= 1:
+                continue
 
-            for line in lines:
-                if not current_chunk:
-                    current_meta = meta or {}
+            if not current_sentences:
+                current_meta = meta or {}
 
-                current_chunk += line + splitter_tag
-                if len(current_chunk) >= chunk_size:
-                    chunks.append(
-                        Document(
-                            page_content=current_chunk.strip(),
-                            metadata=current_meta or {},
-                        )
+            current_sentences.append(s)
+            current_len += len(s) + len(splitter_tag)
+
+            if current_len >= chunk_size:
+                chunk_text = splitter_tag.join(current_sentences).strip()
+                chunks.append(
+                    Document(
+                        page_content=chunk_text,
+                        metadata=current_meta or {},
                     )
-                    current_chunk = ""
-                    current_meta = {}
+                )
 
-        if current_chunk:
+                # Compute sentence-level overlap based on approximate character budget.
+                if overlap_size > 0 and current_sentences:
+                    overlap_sentences: List[str] = []
+                    overlap_len = 0
+                    for sentence in reversed(current_sentences):
+                        if overlap_len >= overlap_size:
+                            break
+                        overlap_sentences.append(sentence)
+                        overlap_len += len(sentence) + len(splitter_tag)
+                    current_sentences = list(reversed(overlap_sentences))
+                    current_len = overlap_len
+                else:
+                    current_sentences = []
+                    current_len = 0
+
+                current_meta = current_meta or {}
+
+        if current_sentences:
+            chunk_text = splitter_tag.join(current_sentences).strip()
             chunks.append(
                 Document(
-                    page_content=current_chunk.strip(),
+                    page_content=chunk_text,
                     metadata=current_meta or {},
                 )
             )

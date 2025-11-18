@@ -24,6 +24,7 @@ import logging
 import json
 import time
 from typing import List, Optional, Dict, Any
+import re
 
 DetectorFactory.seed = 0
 
@@ -508,27 +509,54 @@ async def search_index(
             }
         )
 
-    # Determine template language for summary:
-    # allow explicit override via `output_lang`, otherwise fall back to app settings.
-    requested_output_lang = (summarize_request.output_lang or "").strip().lower() if getattr(summarize_request, "output_lang", None) else ""
-    template_language = requested_output_lang or app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en"
-    template_parser = TemplateParser(
-        language=template_language,
-        default_language=app_settings.DEFAULT_LANG or "en",
-    )
+    # Optional asset filter: restrict search to a single file when asset_id is provided.
+    asset_filter = search_request.asset_id
+    if asset_filter is not None:
+        try:
+            asset_filter_int = int(asset_filter)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.FILE_ID_ERROR.value,
+                    "detail": "Invalid asset_id filter.",
+                },
+            )
+
+        if asset_filter_int not in accessible_asset_ids:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                    "detail": "You do not have access to the requested file.",
+                },
+            )
+
+        asset_ids_for_search = [asset_filter_int]
+    else:
+        asset_ids_for_search = list(accessible_asset_ids)
+
+    # Simple keyword extraction from the query for lexical filtering
+    query_text = search_request.text or ""
+    keywords = [
+        w.lower()
+        for w in re.findall(r"\w+", query_text, flags=re.UNICODE)
+        if len(w) > 3
+    ]
 
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
         generation_client=request.app.generation_client,
         embedding_client=request.app.embedding_client,
-        template_parser=template_parser,
+        template_parser=request.app.template_parser,
     )
 
     results = await nlp_controller.search_vector_db_collection(
         project=project,
         text=search_request.text,
         limit=search_request.limit,
-        asset_ids=list(accessible_asset_ids),
+        asset_ids=asset_ids_for_search,
+        keywords=keywords or None,
     )
 
     if not results:
@@ -682,6 +710,30 @@ async def answer_rag(
         doc_type_filter = extract_document_types_from_query(search_request.text)
     asset_filter = search_request.asset_id
 
+    # Simple keyword extraction from the query for lexical re-ranking
+    query_text = search_request.text or ""
+    keywords = [
+        w.lower()
+        for w in re.findall(r"\w+", query_text, flags=re.UNICODE)
+        if len(w) > 3
+    ]
+
+    # Build an augmented retrieval query that incorporates recent
+    # conversation turns (if any) so that follow-up questions using
+    # pronouns like "هناك / there" still retrieve the right chunks.
+    retrieval_text = search_request.text or ""
+    if chat_messages:
+        parts: list[str] = []
+        for msg in chat_messages[-3:]:
+            prompt_part = (msg.get("prompt") or "").strip()
+            answer_part = (msg.get("answer") or "").strip()
+            if prompt_part:
+                parts.append(prompt_part)
+            if answer_part:
+                parts.append(answer_part)
+        if parts:
+            retrieval_text = "\n".join(parts + [search_request.text or ""])
+
     # Ensure requested asset filter is within the user's accessible scope
     if asset_filter is not None:
         try:
@@ -716,29 +768,89 @@ async def answer_rag(
         for pid, assets in assets_by_project_id.items():
             asset_ids_by_project[pid] = [a.asset_id for a in assets]
 
-    retrieved_documents = []
+    retrieved_documents: list[Any] = []
     if asset_ids_by_project:
         for pid, asset_ids_for_project in asset_ids_by_project.items():
             project_stub = SimpleNamespace(project_id=pid)
             results = await nlp_controller.search_vector_db_collection(
                 project=project_stub,
-                text=search_request.text,
+                text=retrieval_text,
                 limit=search_request.limit,
                 doc_types=doc_type_filter if doc_type_filter else None,
                 asset_ids=asset_ids_for_project,
+                keywords=keywords or None,
             )
             if results:
                 retrieved_documents.extend(results)
 
-    answer_result, full_prompt, chat_history = await nlp_controller.generate_rag_answer_from_documents(
-        retrieved_documents=retrieved_documents,
+    # Attempt deterministic direct extraction (e.g. dates / reasons) before
+    # delegating to the LLM, so simple factual questions behave consistently.
+    question_type = nlp_controller._detect_question_type(search_request.text)
+    direct_hint = nlp_controller._try_extract_direct_answer(
         query=search_request.text,
-        chat_messages=chat_messages,
-        stream=bool(search_request.stream),
-        collector=collector,
-        asset_labels=asset_label_lookup if asset_label_lookup else None,
-        asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+        documents=retrieved_documents or [],
+        question_type=question_type,
     )
+
+    # Try to resolve a human-readable label for the document that most likely
+    # contains the direct hint (for example, the original filename). This
+    # allows deterministic answers like "according to <document name>" instead
+    # of the more generic "according to the documents".
+    doc_label_for_hint: Optional[str] = None
+    if direct_hint and retrieved_documents:
+        chosen_doc = None
+        for doc in retrieved_documents:
+            text_value = getattr(doc, "text", "") or ""
+            if direct_hint in text_value:
+                chosen_doc = doc
+                break
+        if chosen_doc is None:
+            chosen_doc = retrieved_documents[0]
+
+        try:
+            doc_label_for_hint = nlp_controller._resolve_document_label(
+                getattr(chosen_doc, "metadata", None),
+                fallback_label="Document 1",
+                asset_labels=asset_label_lookup if asset_label_lookup else None,
+                asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+                asset_id_hint=None,
+            )
+        except Exception:
+            doc_label_for_hint = None
+
+    # For clear "when / متى" questions where we can reliably extract a concrete
+    # date from the retrieved documents, short-circuit and answer directly for
+    # non-streaming calls. For "why / لماذا" we prefer to pass the extracted
+    # hint into the LLM so it can clean up / enrich the answer instead of
+    # returning the raw snippet.
+    answer_result = None
+    full_prompt = None
+    chat_history = None
+
+    if not search_request.stream and direct_hint and question_type == "when":
+        has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
+        if doc_label_for_hint:
+            prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
+            prefix_en = f'According to the document "{doc_label_for_hint}", '
+        else:
+            prefix_ar = "وفقاً للمستندات، "
+            prefix_en = "According to the documents, "
+
+        if has_arabic:
+            answer_result = f"{prefix_ar}كان ذلك في {direct_hint}."
+        else:
+            answer_result = f"{prefix_en}this occurred on {direct_hint}."
+    else:
+        answer_result, full_prompt, chat_history = await nlp_controller.generate_rag_answer_from_documents(
+            retrieved_documents=retrieved_documents,
+            query=search_request.text,
+            chat_messages=chat_messages,
+            stream=bool(search_request.stream),
+            collector=collector,
+            asset_labels=asset_label_lookup if asset_label_lookup else None,
+            asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+            direct_hint=direct_hint,
+        )
 
     # Basic retrieval stats for later analytics
     retrieved_chunks_count = len(retrieved_documents) if retrieved_documents else 0
@@ -850,6 +962,34 @@ async def answer_rag(
             return reasoning_text
         return ""
 
+    def looks_like_refusal(text: str) -> bool:
+        if not text:
+            return False
+        t = text.strip()
+        patterns = [
+            "لا يمكن تحديد",
+            "لا توجد معلومات كافية",
+            "لا أستطيع الإجابة",
+            "المعلومات غير كافية",
+            "cannot determine",
+            "not enough information",
+            "cannot be determined",
+        ]
+        return any(pat in t for pat in patterns)
+
+    def clean_display_hint(text: str) -> str:
+        """
+        Light cleaning for direct_hint before showing it to the user so that
+        obvious OCR artifacts or formatting issues are less distracting.
+        """
+        if not text:
+            return ""
+        t = text.strip()
+        # Collapse whitespace and strip common surrounding quotes.
+        t = re.sub(r"\s+", " ", t)
+        t = t.strip('\"“”\'')
+        return t
+
     history_filter = doc_type_filter.copy() if doc_type_filter else []
     if asset_filter is not None:
         history_filter.append(f"asset:{asset_filter}")
@@ -923,6 +1063,29 @@ async def answer_rag(
                             }) + "\n"
                 finally:
                     final_answer = compose_final_answer(collector)
+
+                    # If we extracted a direct hint for a "why / لماذا" question
+                    # but the model still produced a refusal-style answer, prefer
+                    # a deterministic answer built directly from the hint instead.
+                    if direct_hint and question_type == "why" and looks_like_refusal(final_answer):
+                        has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
+                        hint_for_display = clean_display_hint(direct_hint)
+                        if doc_label_for_hint:
+                            prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
+                            prefix_en = f'According to the document "{doc_label_for_hint}", '
+                        else:
+                            prefix_ar = "وفقاً للمستندات، "
+                            prefix_en = "According to the documents, "
+                        if has_arabic:
+                            final_answer = (
+                                f"{prefix_ar}تذكر المستندات المعلومة التالية جواباً عن سؤالك: "
+                                f"{hint_for_display}"
+                            )
+                        else:
+                            final_answer = (
+                                f"{prefix_en}the documents provide the following information as the "
+                                f"answer to your question: {hint_for_display}"
+                            )
                     signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
 
                     history_record = None
@@ -996,6 +1159,31 @@ async def answer_rag(
         )
 
     answer = answer_result
+
+    # For non-streaming calls, also override refusal-like answers for
+    # "why / لماذا" questions when we have a direct_hint from the
+    # extractor, so the user still gets a concrete, document-grounded
+    # answer instead of "unknown".
+    if answer and direct_hint and question_type == "why" and looks_like_refusal(answer):
+        has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
+        hint_for_display = clean_display_hint(direct_hint)
+        if doc_label_for_hint:
+            prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
+            prefix_en = f'According to the document "{doc_label_for_hint}", '
+        else:
+            prefix_ar = "وفقاً للمستندات، "
+            prefix_en = "According to the documents, "
+        if has_arabic:
+            answer = (
+                f"{prefix_ar}تذكر المستندات المعلومة التالية جواباً عن سؤالك: "
+                f"{hint_for_display}"
+            )
+        else:
+            answer = (
+                f"{prefix_en}the documents provide the following information as the "
+                f"answer to your question: {hint_for_display}"
+            )
+
     if not answer:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1166,10 +1354,14 @@ async def summarize_project(
             }
         )
 
+    # Always load all chunks for summarization so that very large
+    # documents are covered end-to-end. We rely on hierarchical
+    # summarization and section-level clamping later to stay within
+    # the model's context window.
     chunks = await chunk_model.get_project_chunks_for_summary(
         project_id=project.project_id,
         asset_ids=accessible_asset_ids,
-        limit=max_chunks
+        limit=None,
     )
 
     if not chunks:
@@ -1206,29 +1398,42 @@ async def summarize_project(
                 chunks = filtered_chunks
                 total_chunks = len(chunks)
 
-    # Safety clamp: when max_chunks is 0 or None and the document is very large,
-    # cap the effective number of chunks to avoid oversized prompts.
-    MAX_SAFE_CHUNKS = 200
-    if (summarize_request.max_chunks is None or summarize_request.max_chunks == 0) and total_chunks > MAX_SAFE_CHUNKS:
-        chunks = chunks[:MAX_SAFE_CHUNKS]
-        total_chunks = len(chunks)
-
     # Keep track of the original chunks for metadata (chunk_ids, counts),
     # but allow a separate list of "summary input chunks" that may pass through
     # a hierarchical summarization step.
     source_chunks = chunks
 
-    nlp_controller = NLPController(
-        vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
-        embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
-    )
-
     summary_max_tokens = (
         summarize_request.max_output_tokens
         or app_settings.SUMMARY_DEFAULT_MAX_TOKENS
         or app_settings.GENERATION_DAFAULT_MAX_TOKENS
+    )
+
+    # Determine template language for summary:
+    # allow explicit override via `output_lang`, otherwise fall back to app settings.
+    requested_output_lang = (
+        (summarize_request.output_lang or "").strip().lower()
+        if getattr(summarize_request, "output_lang", None)
+        else ""
+    )
+    template_language = (
+        requested_output_lang
+        or app_settings.PRIMARY_LANG
+        or app_settings.DEFAULT_LANG
+        or "en"
+    )
+    template_parser = TemplateParser(
+        language=template_language,
+        default_language=app_settings.DEFAULT_LANG or "en",
+    )
+
+    # Use a fresh NLPController with the per-request template language,
+    # so that selecting Arabic in the UI actually switches the summary prompt.
+    nlp_controller = NLPController(
+        vectordb_client=request.app.vectordb_client,
+        generation_client=generation_client,
+        embedding_client=request.app.embedding_client,
+        template_parser=template_parser,
     )
 
     # Hierarchical summarization for very large documents:
@@ -1237,11 +1442,14 @@ async def summarize_project(
     summary_input_chunks = chunks
     HIERARCHICAL_THRESHOLD = 120  # number of chunks above which we switch to hierarchical
     SECTION_SIZE = 20  # chunks per section
+    MAX_SECTION_SUMMARIES = 20   # clamp at the section-summary level
 
     if total_chunks > HIERARCHICAL_THRESHOLD:
         section_summaries: List[str] = []
         section_max_tokens = min(summary_max_tokens, 256)
 
+        # First pass: summarize each logical section so that *all* parts of the
+        # document contribute to some section-level summary.
         for i in range(0, total_chunks, SECTION_SIZE):
             section = chunks[i : i + SECTION_SIZE]
             if not section:
@@ -1261,6 +1469,20 @@ async def summarize_project(
                 section_summaries.append(section_summary.strip())
 
         if section_summaries:
+            # If there are too many section summaries to fit comfortably into the
+            # model context, subsample them *evenly across the document* so that
+            # the final summary still represents the whole file rather than only
+            # the beginning.
+            if len(section_summaries) > MAX_SECTION_SUMMARIES:
+                step = len(section_summaries) / MAX_SECTION_SUMMARIES
+                selected = []
+                for idx in range(MAX_SECTION_SUMMARIES):
+                    pos = int(idx * step)
+                    if pos >= len(section_summaries):
+                        pos = len(section_summaries) - 1
+                    selected.append(section_summaries[pos])
+                section_summaries = selected
+
             # Build synthetic "chunks" from section summaries for the final pass.
             summary_input_chunks = [
                 SimpleNamespace(
@@ -1280,8 +1502,12 @@ async def summarize_project(
         for chunk in source_chunks
         if getattr(chunk, "chunk_id", None) is not None
     ]
-    stream_enabled = summarize_request.stream if summarize_request.stream is not None else True
 
+    stream_enabled = (
+        summarize_request.stream
+        if summarize_request.stream is not None
+        else True
+    )
     collector = {"output": [], "reasoning": []} if stream_enabled else None
 
     summary_output, full_prompt = nlp_controller.summarize_chunks(
