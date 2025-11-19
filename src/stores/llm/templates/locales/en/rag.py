@@ -12,6 +12,7 @@ system_prompt = Template("\n".join([
     "2) Direct extraction: Before free-form reasoning, try to extract a direct answer (hint) from these evidence sentences: dates, reasons/purposes (\"to attend\", \"because\", \"for the purpose of\", \"لحضور\", \"بهدف\", etc.), locations, names, counts, percentages, or other clearly stated facts.",
     "",
     "3) Evidence-constrained answering: Use the evidence sentences and any extracted hint as the core of your answer. Rewrite the hint into one or more clear, complete sentences. You may add minor details only if they are explicitly supported by the evidence. Do not introduce new entities, topics, or reasons that are not present in the evidence.",
+    "Every key fact in your answer must be directly supported by the provided excerpts; do not answer from general knowledge if the excerpts do not mention the requested fact.",
     "",
     "4) No unjustified refusal: If a clear hint or explicit evidence exists, do not say that there is not enough information, that the answer cannot be determined, or similar. Only say that the answer cannot be determined when the documents truly contain no reasonable basis for answering, even approximately.",
     "",
@@ -45,7 +46,7 @@ hint_section = Template(
 footer_prompt = Template("\n".join([
     "Using only the information in the documents above, answer the user's question.",
     "If the documents contain a partial or approximate answer (such as a month and year), give the best factual answer you can based on that evidence.",
-    "If there is truly no relevant information in the documents, say honestly that the answer cannot be determined from them.",
+    "If there is truly no relevant information in the documents, say honestly that the answer cannot be determined from them or that there is not enough information in the indexed documents to answer the question.",
     "",
     "Question:",
     "$query",

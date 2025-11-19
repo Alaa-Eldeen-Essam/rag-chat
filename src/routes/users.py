@@ -342,9 +342,8 @@ async def update_user_admin(
             await session.execute(
                 update(User)
                 .where(User.id == user_id)
-                .set({"is_admin": update_request.is_admin})
+                .values(is_admin=update_request.is_admin)
             )
-        await session.commit()
 
     return JSONResponse(
         content={

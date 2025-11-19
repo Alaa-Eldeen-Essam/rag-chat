@@ -23,14 +23,26 @@ from tqdm.auto import tqdm
 import logging
 import json
 import time
+import math
 from typing import List, Optional, Dict, Any
 import re
+
+from stores.llm.LLMEnums import DocumentTypeEnum
 
 DetectorFactory.seed = 0
 
 def detect_language_or_default(text: str, default: str) -> str:
+    """
+    Heuristic language detector for Arabic vs. English with a fast
+    script-based check first, then langdetect as a fallback.
+    """
     if not text:
         return default
+
+    # If the text contains any Arabic-script characters, assume Arabic.
+    if re.search(r"[\u0600-\u06FF]", text):
+        return "ar"
+
     try:
         lang = detect(text)
     except LangDetectException:
@@ -688,27 +700,66 @@ async def answer_rag(
             initial_prompt=search_request.text
         )
 
-    recent_history = await chat_history_model.get_recent_history_by_conversation(
-        conversation_id=conversation.conversation_id,
-        limit=5
-    )
-
-    chat_messages = [
-        {
-            "prompt": record.prompt,
-            "answer": record.answer,
-        }
-        for record in recent_history
-    ]
-
-    collector = {"output": [], "reasoning": []} if search_request.stream else None
-
     explicit_doc_type = (search_request.doc_type or "").strip().lower() if hasattr(search_request, "doc_type") else ""
     if explicit_doc_type and explicit_doc_type != "all":
         doc_type_filter = [explicit_doc_type]
     else:
         doc_type_filter = extract_document_types_from_query(search_request.text)
     asset_filter = search_request.asset_id
+
+    recent_history = await chat_history_model.get_recent_history_by_conversation(
+        conversation_id=conversation.conversation_id,
+        limit=5
+    )
+
+    # Build chat history for the LLM, but only reuse turns that are
+    # compatible with the current doc_type / file filters. This keeps
+    # follow-ups on the same scope rich, while avoiding leaking context
+    # from questions asked under different document types or files.
+    chat_messages = []
+    last_user_question: Optional[str] = None
+    for record in recent_history:
+        record_doc_types = getattr(record, "doc_types", None) or []
+        # If no filters are active, reuse all history.
+        if not explicit_doc_type and asset_filter is None:
+            chat_messages.append(
+                {
+                    "prompt": record.prompt,
+                    "answer": record.answer,
+                }
+            )
+            if record.prompt:
+                last_user_question = record.prompt
+            continue
+
+        compatible = True
+
+        # DocType compatibility: if an explicit doc_type is set now, only
+        # reuse history that was created under the same doc_type, or under
+        # the generic "all" scope.
+        if explicit_doc_type:
+            lowered_record_types = {str(dt).strip().lower() for dt in record_doc_types}
+            if "all" not in lowered_record_types and explicit_doc_type not in lowered_record_types:
+                compatible = False
+
+        # Asset/file compatibility: if a file filter is active, only reuse
+        # history entries that were associated with the same asset.
+        if compatible and asset_filter is not None:
+            tag = f"asset:{asset_filter}"
+            if tag not in record_doc_types:
+                compatible = False
+
+        if compatible:
+            chat_messages.append(
+                {
+                    "prompt": record.prompt,
+                    "answer": record.answer,
+                }
+            )
+            if record.prompt:
+                last_user_question = record.prompt
+
+    collector = {"output": [], "reasoning": []} if search_request.stream else None
 
     # Simple keyword extraction from the query for lexical re-ranking
     query_text = search_request.text or ""
@@ -718,21 +769,49 @@ async def answer_rag(
         if len(w) > 3
     ]
 
-    # Build an augmented retrieval query that incorporates recent
-    # conversation turns (if any) so that follow-up questions using
-    # pronouns like "هناك / there" still retrieve the right chunks.
+    # For retrieval, embed primarily the current question text. When the
+    # last user question in the same scoped conversation is strongly
+    # similar to the current question (embedding-based), treat the new
+    # query as a follow-up and build a combined retrieval text so that
+    # retrieval stays on-topic in multi-turn flows without relying on
+    # language-specific heuristics.
     retrieval_text = search_request.text or ""
-    if chat_messages:
-        parts: list[str] = []
-        for msg in chat_messages[-3:]:
-            prompt_part = (msg.get("prompt") or "").strip()
-            answer_part = (msg.get("answer") or "").strip()
-            if prompt_part:
-                parts.append(prompt_part)
-            if answer_part:
-                parts.append(answer_part)
-        if parts:
-            retrieval_text = "\n".join(parts + [search_request.text or ""])
+    embedding_client = getattr(request.app, "embedding_client", None)
+
+    def _cosine_similarity(a: List[float], b: List[float]) -> Optional[float]:
+        if not a or not b or len(a) != len(b):
+            return None
+        dot = 0.0
+        na = 0.0
+        nb = 0.0
+        for x, y in zip(a, b):
+            dot += x * y
+            na += x * x
+            nb += y * y
+        if na <= 0.0 or nb <= 0.0:
+            return None
+        return dot / (math.sqrt(na) * math.sqrt(nb))
+
+    if (
+        embedding_client is not None
+        and last_user_question
+        and retrieval_text
+        and last_user_question.strip()
+        and retrieval_text.strip()
+    ):
+        try:
+            vecs = embedding_client.embed_text(
+                text=[last_user_question, retrieval_text],
+                document_type=DocumentTypeEnum.QUERY.value,
+            )
+            if isinstance(vecs, list) and len(vecs) >= 2:
+                v_last, v_now = vecs[0], vecs[1]
+                sim = _cosine_similarity(v_last, v_now)
+                # Treat similarity above this threshold as a follow-up.
+                if sim is not None and sim >= 0.4:
+                    retrieval_text = f"{last_user_question}\n\n{retrieval_text}"
+        except Exception as exc:
+            logger.error("Follow-up similarity check failed: %s", exc)
 
     # Ensure requested asset filter is within the user's accessible scope
     if asset_filter is not None:
@@ -880,6 +959,16 @@ async def answer_rag(
                     continue
 
     no_answer_from_docs = answer_result is None and (full_prompt is None or chat_history is None)
+
+    # Build a lightweight evidence corpus (lowercased) for post-hoc
+    # checking that the final answer is actually grounded in retrieved
+    # text. This is used only for non-streaming calls.
+    evidence_corpus = ""
+    if retrieved_documents:
+        parts: List[str] = []
+        for doc in retrieved_documents:
+            parts.append((getattr(doc, "text", "") or "").lower())
+        evidence_corpus = " ".join(parts)
 
     def build_sources(max_sources: int = 5) -> List[Dict[str, str]]:
         sources: List[Dict[str, str]] = []
@@ -1184,6 +1273,25 @@ async def answer_rag(
                 f"answer to your question: {hint_for_display}"
             )
 
+    # Evidence-strict post-check: if there is essentially no lexical
+    # overlap between the answer and the retrieved evidence, prefer the
+    # standard fallback message instead of a likely hallucinated answer.
+    if answer:
+        tokens = re.findall(r"\w+", answer.lower(), flags=re.UNICODE)
+        content_tokens = [t for t in tokens if len(t) > 3]
+        # Very short answers are unlikely to be harmful; skip strict check.
+        if len(content_tokens) > 3:
+            unique_tokens = list(dict.fromkeys(content_tokens))
+            matches = 0
+            if evidence_corpus:
+                for tok in unique_tokens:
+                    if tok in evidence_corpus:
+                        matches += 1
+                        if matches >= 2:
+                            break
+            if not evidence_corpus or matches < 2:
+                answer = fallback_answer
+
     if not answer:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1410,17 +1518,18 @@ async def summarize_project(
     )
 
     # Determine template language for summary:
-    # allow explicit override via `output_lang`, otherwise fall back to app settings.
-    requested_output_lang = (
-        (summarize_request.output_lang or "").strip().lower()
-        if getattr(summarize_request, "output_lang", None)
-        else ""
-    )
-    template_language = (
-        requested_output_lang
-        or app_settings.PRIMARY_LANG
-        or app_settings.DEFAULT_LANG
-        or "en"
+    # Detect based on the document content (first few chunks). If no
+    # reasonable sample is available, fall back to app settings.
+    sample_text_parts: List[str] = []
+    for chunk in source_chunks[:3]:
+        chunk_text = getattr(chunk, "chunk_text", "") or ""
+        if chunk_text:
+            sample_text_parts.append(chunk_text)
+    sample_text = " ".join(sample_text_parts)[:2000] if sample_text_parts else ""
+
+    template_language = detect_language_or_default(
+        sample_text,
+        app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en",
     )
     template_parser = TemplateParser(
         language=template_language,
@@ -1441,8 +1550,8 @@ async def summarize_project(
     # - Then, summarize those section summaries to produce a document-level summary.
     summary_input_chunks = chunks
     HIERARCHICAL_THRESHOLD = 120  # number of chunks above which we switch to hierarchical
-    SECTION_SIZE = 20  # chunks per section
-    MAX_SECTION_SUMMARIES = 20   # clamp at the section-summary level
+    SECTION_SIZE = 10  # chunks per section
+    MAX_SECTION_SUMMARIES = 20   # clamp at the section-summary level to this many
 
     if total_chunks > HIERARCHICAL_THRESHOLD:
         section_summaries: List[str] = []

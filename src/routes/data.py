@@ -7,7 +7,7 @@ from controllers import DataController, ProjectController, ProcessController, NL
 import aiofiles
 from models import ResponseSignal
 import logging
-from .schemes.data import ProcessRequest
+from .schemes.data import ProcessRequest, UpdateDocTypeRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
 from models.AssetModel import AssetModel
@@ -15,6 +15,8 @@ from models.db_schemes import DataChunk, Asset, User
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from routes.dependencies import get_current_user
 from typing import List, Optional
+from types import SimpleNamespace
+from sqlalchemy import select
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -871,10 +873,142 @@ async def delete_asset(
         await request.app.vectordb_client.delete_records(collection_name, chunk_ids)
 
     await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+
+    # Also delete the underlying file from disk if it exists.
+    try:
+        project_path = ProjectController().get_project_path(
+            project_id=asset_record.asset_project_id
+        )
+        file_path = os.path.join(project_path, asset_record.asset_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as exc:
+        logger.error(
+            "Failed to delete file from disk for asset %s: %s",
+            asset_id,
+            exc,
+        )
+
     await asset_model.delete_asset(asset_record)
 
     return JSONResponse(
         content={
             "signal": ResponseSignal.FILE_DELETE_SUCCESS.value
+        }
+    )
+
+
+@data_router.patch("/assets/{asset_id}/doc-type")
+async def update_asset_doc_type(
+    request: Request,
+    asset_id: int,
+    update_request: UpdateDocTypeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update the document type of an asset.
+    - Admins can update any asset.
+    - Regular users can only update assets they own.
+    """
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user,
+    )
+
+    if asset_record is None:
+        if exists_or_forbidden:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
+                },
+            )
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.FILE_ID_ERROR.value
+            },
+        )
+
+    is_owner = asset_record.asset_user_id == getattr(current_user, "id", None)
+    is_admin = getattr(current_user, "is_admin", False)
+    if not (is_owner or is_admin):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Only the file owner or an admin can modify this file.",
+            },
+        )
+
+    new_doc_type = normalize_document_type(update_request.doc_type or "")
+
+    # Update asset's document type
+    async with request.app.db_client() as session:
+        async with session.begin():
+            db_asset = await session.get(Asset, asset_record.asset_id)
+            if db_asset is not None:
+                db_asset.asset_document_type = new_doc_type
+
+            # Also update doc_type inside chunk_metadata for all related chunks
+            result = await session.execute(
+                select(DataChunk).where(
+                    DataChunk.chunk_asset_id == asset_record.asset_id
+                )
+            )
+            chunks = result.scalars().all()
+            for ch in chunks:
+                meta = ch.chunk_metadata or {}
+                meta["doc_type"] = new_doc_type
+                ch.chunk_metadata = meta
+
+    # Re-index affected chunks in the vector DB so that metadata used for
+    # filtering and analytics stays in sync.
+    chunk_model = await ChunkModel.create_instance(
+        db_client=request.app.db_client
+    )
+    chunk_ids = await chunk_model.get_chunk_ids_by_asset_ids(
+        [asset_record.asset_id]
+    )
+
+    if chunk_ids:
+        updated_chunks = await chunk_model.get_chunks_by_ids(chunk_ids)
+
+        nlp_controller = NLPController(
+            vectordb_client=request.app.vectordb_client,
+            generation_client=request.app.generation_client,
+            embedding_client=request.app.embedding_client,
+            template_parser=request.app.template_parser,
+        )
+
+        collection_name = nlp_controller.create_collection_name(
+            project_id=asset_record.asset_project_id
+        )
+
+        # Remove existing vector records for these chunks, then re-index with
+        # updated metadata (text is unchanged, but doc_type is).
+        await request.app.vectordb_client.delete_records(
+            collection_name, chunk_ids
+        )
+
+        project_stub = SimpleNamespace(
+            project_id=asset_record.asset_project_id
+        )
+        await nlp_controller.index_into_vector_db(
+            project=project_stub,
+            chunks=updated_chunks,
+            chunks_ids=chunk_ids,
+            do_reset=False,
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_UPLOAD_SUCCESS.value,
+            "asset_id": asset_record.asset_id,
+            "doc_type": new_doc_type,
         }
     )

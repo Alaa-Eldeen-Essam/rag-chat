@@ -504,12 +504,21 @@ async def _compute_global_stats(session) -> Dict[str, Any]:
             global_doc_type_counter.update(dt.lower() for dt in doc_types)
 
     top_users_rows = await session.execute(
-        select(ChatHistory.user_id, func.count(ChatHistory.id))
-        .group_by(ChatHistory.user_id)
+        select(ChatHistory.user_id, User.username, User.department, func.count(ChatHistory.id))
+        .join(User, ChatHistory.user_id == User.id)
+        .group_by(ChatHistory.user_id, User.username, User.department)
         .order_by(func.count(ChatHistory.id).desc())
         .limit(10)
     )
-    top_users = [{"user_id": user_id, "queries": count} for user_id, count in top_users_rows]
+    top_users = [
+        {
+            "user_id": user_id,
+            "username": username,
+            "department": department,
+            "queries": count,
+        }
+        for user_id, username, department, count in top_users_rows
+    ]
 
     # Latency percentiles (P50/P90/P95/P99)
     response_rows = await session.execute(
