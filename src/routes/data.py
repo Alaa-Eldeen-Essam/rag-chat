@@ -40,7 +40,7 @@ async def upload_data(
     project_id: int,
     file: UploadFile,
     is_private: bool = Form(True),
-    doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
+    doc_type: str = Form(""),
     visibility: str = Form("private"),
     department: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
@@ -112,6 +112,15 @@ async def upload_data(
     if vis == "department":
         effective_department = (department or getattr(current_user, "department", None) or "Global")
 
+    if not doc_type or not doc_type.strip():
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.FILE_TYPE_NOT_SUPPORTED.value,
+                "detail": "Document type is required."
+            },
+        )
+
     normalized_doc_type = normalize_document_type(doc_type)
 
     asset_resource = Asset(
@@ -147,8 +156,8 @@ async def upload_process_index(
     request: Request,
     project_id: int,
     file: UploadFile,
-    chunk_size: int = Form(900),
-    overlap_size: int = Form(300),
+    chunk_size: int = Form(400),
+    overlap_size: int = Form(50),
     do_reset: int = Form(0),
     is_private: bool = Form(True),
     doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
@@ -352,7 +361,7 @@ async def upload_process_index_batch(
     overlap_size: int = Form(200),
     do_reset: int = Form(0),
     is_private: bool = Form(True),
-    doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
+    doc_type: str = Form(""),
     visibility: str = Form("private"),
     department: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
@@ -404,6 +413,15 @@ async def upload_process_index_batch(
     if vis == "department":
         effective_department = (
             department or getattr(current_user, "department", None) or "Global"
+        )
+
+    if not doc_type or not doc_type.strip():
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.FILE_TYPE_NOT_SUPPORTED.value,
+                "detail": "Document type is required."
+            },
         )
 
     normalized_doc_type = normalize_document_type(doc_type)

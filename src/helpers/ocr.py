@@ -1,4 +1,3 @@
-import io
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -86,3 +85,111 @@ def ocr_pdf_file(
 
     return results
 
+
+def _clean_utf8_text(text: str) -> str:
+    """
+    Normalize text to UTF-8 by removing characters that cannot be encoded.
+    """
+    return (text or "").encode("utf-8", errors="ignore").decode("utf-8", errors="ignore").strip()
+
+
+def requires_ocr_for_pdf(path: str) -> bool:
+    """
+    Inspect a PDF to decide whether OCR is required.
+
+    Returns True when:
+      - The PDF contains no extractable text.
+      - Any span contains invalid / non-UTF-8 encodings (e.g., replacement chars).
+    Returns False only when text exists and appears valid.
+    """
+    try:
+        doc = fitz.open(path)
+    except Exception as exc:
+        logger.error("Failed to open PDF '%s' to check OCR need: %s", path, exc)
+        return True
+
+    has_text = False
+    bad_encoding = False
+
+    try:
+        for page in doc:
+            page_txt = page.get_text() or ""
+            if page_txt.strip():
+                has_text = True
+
+            # Inspect spans for encoding quality
+            try:
+                raw = page.get_text("rawdict") or {}
+                blocks = raw.get("blocks", [])
+                for block in blocks:
+                    for line in block.get("lines", []):
+                        for span in line.get("spans", []):
+                            txt = span.get("text", "")
+                            if not txt:
+                                continue
+                            # Replacement characters or encode errors -> bad
+                            if "\ufffd" in txt:
+                                bad_encoding = True
+                                break
+                            try:
+                                txt.encode("utf-8")
+                            except UnicodeEncodeError:
+                                bad_encoding = True
+                                break
+                        if bad_encoding:
+                            break
+                    if bad_encoding:
+                        break
+                if bad_encoding:
+                    break
+            except Exception:
+                # If we cannot inspect spans reliably, fall back to OCR.
+                bad_encoding = True
+                break
+    finally:
+        doc.close()
+
+    if not has_text:
+        return True
+    if bad_encoding:
+        return True
+    return False
+
+
+def ocr_pdf_to_text(path: str, lang: str, max_pages: Optional[int] = None, dpi: int = 300) -> str:
+    """
+    OCR an entire PDF and return the concatenated UTF-8 text.
+    """
+    ocr_results = ocr_pdf_file(path=path, lang=lang, max_pages=max_pages, dpi=dpi)
+    combined = "\n\n".join(text for text, _meta in ocr_results if text)
+    return _clean_utf8_text(combined)
+
+
+def extract_pdf_text_with_ocr(path: str, lang: str, max_pages: Optional[int] = None, dpi: int = 300) -> Tuple[str, bool]:
+    """
+    Extract PDF text using PyMuPDF, falling back to OCR when needed.
+
+    Returns (text, used_ocr).
+    """
+    needs_ocr = requires_ocr_for_pdf(path)
+    if not needs_ocr:
+        try:
+            doc = fitz.open(path)
+        except Exception as exc:
+            logger.error("Failed to open PDF '%s' for text extraction: %s", path, exc)
+            needs_ocr = True
+        else:
+            try:
+                parts: List[str] = []
+                for page in doc:
+                    parts.append(page.get_text() or "")
+                text = _clean_utf8_text("\n\n".join(parts))
+                if text:
+                    return text, False
+                needs_ocr = True
+            finally:
+                doc.close()
+
+    # OCR path
+    text = ocr_pdf_to_text(path=path, lang=lang, max_pages=max_pages, dpi=dpi)
+    return text, True

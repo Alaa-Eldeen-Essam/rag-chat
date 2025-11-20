@@ -4,11 +4,14 @@ import unicodedata
 from dataclasses import dataclass
 from typing import List, Optional
 
-from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
+from langchain_community.document_loaders import TextLoader
 
 from .BaseController import BaseController
 from .ProjectController import ProjectController
-from helpers.ocr import ocr_image_file, ocr_pdf_file
+from helpers.ocr import (
+    ocr_image_file,
+    extract_pdf_text_with_ocr,
+)
 from models import ProcessingEnum
 
 @dataclass
@@ -38,7 +41,8 @@ class ProcessController(BaseController):
             return TextLoader(file_path, encoding="utf-8")
 
         if file_ext == ProcessingEnum.PDF.value:
-            return PyMuPDFLoader(file_path)
+            # PDF handling is custom and does not use a langchain loader here.
+            return None
 
         return None
 
@@ -99,6 +103,23 @@ class ProcessController(BaseController):
         if not os.path.exists(file_path):
             return None
 
+        # PDF handling with OCR detection
+        if file_ext == ProcessingEnum.PDF.value:
+            text, used_ocr = extract_pdf_text_with_ocr(
+                path=file_path,
+                lang=getattr(self.app_settings, "OCR_LANGS", "eng"),
+                max_pages=getattr(self.app_settings, "OCR_MAX_PAGES", None),
+                dpi=getattr(self.app_settings, "OCR_DPI", 300) or 300,
+            )
+            text = (text or "").strip()
+            if not text:
+                return None
+            meta = {}
+            if used_ocr:
+                meta["ocr_used"] = True
+                meta["ocr_lang"] = getattr(self.app_settings, "OCR_LANGS", "eng")
+            return [Document(page_content=text, metadata=meta)]
+
         loader = self.get_file_loader(file_id=file_id)
         docs = loader.load() if loader else None
 
@@ -123,38 +144,14 @@ class ProcessController(BaseController):
                 )
             ]
 
-        # For PDFs: try normal extraction, then fall back to OCR if needed.
-        if file_ext == ProcessingEnum.PDF.value:
-            if not self._should_fallback_to_ocr(docs):
-                return docs
-
-            ocr_results = ocr_pdf_file(
-                path=file_path,
-                lang=self.app_settings.OCR_LANGS,
-                max_pages=self.app_settings.OCR_MAX_PAGES,
-                dpi=self.app_settings.OCR_DPI or 300,
-            )
-            if not ocr_results:
-                # If OCR fails or returns nothing, keep whatever we had.
-                return docs
-
-            ocr_docs = [
-                Document(
-                    page_content=text,
-                    metadata=metadata,
-                )
-                for (text, metadata) in ocr_results
-            ]
-            return ocr_docs
-
         return docs
 
     def process_file_content(
         self,
         file_content: list,
         file_id: str,
-        chunk_size: int = 900,
-        overlap_size: int = 300,
+        chunk_size: int = 400,
+        overlap_size: int = 50,
     ):
         """
         Turn raw file pages into sentence-like segments first, then group them

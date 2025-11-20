@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 class PushRequest(BaseModel):
     do_reset: Optional[int] = 0
@@ -12,6 +12,7 @@ class SearchRequest(BaseModel):
     conversation_id: Optional[int] = None
     model: Optional[str] = None
     asset_id: Optional[int] = None
+    asset_ids: Optional[List[int]] = None
     doc_type: Optional[str] = None
 
 class SummarizeRequest(BaseModel):

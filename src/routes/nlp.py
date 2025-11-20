@@ -93,6 +93,9 @@ async def index_project(
     current_user: User = Depends(get_current_user),
 ):
 
+    app_settings = get_settings()
+    generation_client = getattr(request.app, "generation_client", None)
+
     project_model = await ProjectModel.create_instance(
         db_client=request.app.db_client
     )
@@ -142,11 +145,9 @@ async def index_project(
             )
         target_asset_id = asset_record.asset_id
 
-    focus_text = summarize_request.focus or ""
-    template_language = detect_language_or_default(
-        focus_text,
-        app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en",
-    )
+    # For indexing we don't have user-provided text to detect language from.
+    # Default to the primary/default app language.
+    template_language = app_settings.PRIMARY_LANG or app_settings.DEFAULT_LANG or "en"
     template_parser = TemplateParser(
         language=template_language,
         default_language=app_settings.DEFAULT_LANG or "en",
@@ -166,11 +167,14 @@ async def index_project(
     # create collection if not exists
     collection_name = nlp_controller.create_collection_name(project_id=project.project_id)
 
+    do_reset_flag = bool(push_request.do_reset)
     _ = await request.app.vectordb_client.create_collection(
         collection_name=collection_name,
         embedding_size=request.app.embedding_client.embedding_size,
-        do_reset=push_request.do_reset,
+        do_reset=do_reset_flag,
     )
+    # Avoid resetting the collection on each batch insertion.
+    do_reset_flag = False
 
     # setup batching
     total_chunks_count = await chunk_model.get_total_chunks_count(
@@ -207,7 +211,7 @@ async def index_project(
         is_inserted = await nlp_controller.index_into_vector_db(
             project=project,
             chunks=page_chunks,
-            do_reset=push_request.do_reset,
+            do_reset=do_reset_flag,
             chunks_ids=chunks_ids
         )
 
@@ -701,11 +705,32 @@ async def answer_rag(
         )
 
     explicit_doc_type = (search_request.doc_type or "").strip().lower() if hasattr(search_request, "doc_type") else ""
-    if explicit_doc_type and explicit_doc_type != "all":
-        doc_type_filter = [explicit_doc_type]
-    else:
-        doc_type_filter = extract_document_types_from_query(search_request.text)
+    if not explicit_doc_type or explicit_doc_type == "all":
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.VECTORDB_SEARCH_ERROR.value,
+                "detail": "You must select a document type before asking questions.",
+            },
+        )
+    doc_type_filter = [explicit_doc_type]
     asset_filter = search_request.asset_id
+    asset_filters: Optional[List[int]] = None
+    if getattr(search_request, "asset_ids", None):
+        try:
+            asset_filters = [
+                int(aid)
+                for aid in (search_request.asset_ids or [])
+                if aid is not None
+            ]
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.FILE_ID_ERROR.value,
+                    "detail": "Invalid asset_ids filter.",
+                },
+            )
 
     recent_history = await chat_history_model.get_recent_history_by_conversation(
         conversation_id=conversation.conversation_id,
@@ -813,8 +838,18 @@ async def answer_rag(
         except Exception as exc:
             logger.error("Follow-up similarity check failed: %s", exc)
 
-    # Ensure requested asset filter is within the user's accessible scope
-    if asset_filter is not None:
+    # Ensure requested asset filter(s) are within the user's accessible scope
+    if asset_filters:
+        invalid_ids = [aid for aid in asset_filters if aid not in accessible_asset_ids]
+        if invalid_ids:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                    "detail": "You do not have access to one or more requested files.",
+                },
+            )
+    elif asset_filter is not None:
         try:
             asset_filter_int = int(asset_filter)
         except (TypeError, ValueError):
@@ -838,7 +873,12 @@ async def answer_rag(
 
     # Build project -> asset_ids mapping for search
     asset_ids_by_project: dict[int, list[int]] = {}
-    if asset_filter is not None:
+    if asset_filters:
+        for aid in asset_filters:
+            project_for_asset = asset_to_project.get(aid)
+            if project_for_asset is not None:
+                asset_ids_by_project.setdefault(project_for_asset, []).append(aid)
+    elif asset_filter is not None:
         asset_filter_int = int(asset_filter)
         project_for_asset = asset_to_project.get(asset_filter_int)
         if project_for_asset is not None:
@@ -970,7 +1010,7 @@ async def answer_rag(
             parts.append((getattr(doc, "text", "") or "").lower())
         evidence_corpus = " ".join(parts)
 
-    def build_sources(max_sources: int = 5) -> List[Dict[str, str]]:
+    def build_sources(max_sources: int = 15) -> List[Dict[str, str]]:
         sources: List[Dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
 
@@ -1005,8 +1045,15 @@ async def answer_rag(
 
             page = meta_dict.get("page") or meta_dict.get("page_number")
             section = meta_dict.get("section") or meta_dict.get("heading")
-            if page is not None:
-                location = f"Page {page}"
+            page_no: Optional[int] = None
+            try:
+                if page is not None:
+                    page_no = int(page)
+            except (TypeError, ValueError):
+                page_no = None
+
+            if page_no is not None:
+                location = f"Page {page_no}"
             elif section:
                 location = str(section)
             else:
@@ -1025,6 +1072,8 @@ async def answer_rag(
                 {
                     "file_name": str(file_name),
                     "location": location,
+                    "page": page_no,
+                    "excerpt_index": idx + 1,
                     "snippet": snippet,
                 }
             )
