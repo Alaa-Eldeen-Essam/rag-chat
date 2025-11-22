@@ -36,6 +36,13 @@ class UserModel(BaseDataModel):
             )
             return result.scalar_one_or_none()
 
+    async def get_user_by_id(self, user_id: int):
+        async with self.db_client() as session:
+            result = await session.execute(
+                select(User).where(User.id == user_id)
+            )
+            return result.scalar_one_or_none()
+
     async def count_users(self) -> int:
         async with self.db_client() as session:
             result = await session.execute(select(func.count(User.id)))

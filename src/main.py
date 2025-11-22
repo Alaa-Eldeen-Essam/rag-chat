@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import base, data, nlp, users, stats
+from routes import auth, base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
@@ -94,6 +94,7 @@ app.on_event("startup")(startup_span)
 app.on_event("shutdown")(shutdown_span)
 
 app.include_router(base.base_router)
+app.include_router(auth.auth_router)
 app.include_router(data.data_router)
 app.include_router(nlp.nlp_router)
 app.include_router(users.users_router)

@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     PRIMARY_LANG: str = "en"
     DEFAULT_LANG: str = "en"
 
+    JWT_SECRET_KEY: str = "change-me"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
+
     class Config:
         env_file = ".env"
 

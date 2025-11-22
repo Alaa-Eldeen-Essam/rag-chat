@@ -1,74 +1,49 @@
-# Auth & Roles
+# Authentication & Session Tokens
 
-This project uses HTTP Basic authentication and a simple role model (`user` vs `admin`) to control access to endpoints and UI sections.
+Mini RAG now supports offline-ready sessions via self-issued JWT access tokens. Users log in once, and as long as the token remains valid, page reloads no longer require re-entering credentials.
 
-## Authentication
+## Backend Changes
 
-- Every protected backend route expects:
+- `/api/v1/auth/login` (JSON) accepts `{ "username": "...", "password": "..." }` and returns:
 
-```http
-Authorization: Basic base64("username:password")
+  ```json
+  {
+    "access_token": "<JWT>",
+    "token_type": "bearer",
+    "expires_in": 86400,
+    "user": { "id": 1, "username": "admin", "is_admin": true, "department": "Admins" }
+  }
+  ```
+
+- The token encodes `user_id`, `username`, and `is_admin` and expires after `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` (default 1440 minutes = 24h).
+- `routes/dependencies.get_current_user` now accepts both Bearer tokens and legacy Basic Auth. Existing API scripts that still use Basic headers continue to work.
+
+### Configuration
+
+Set the following in `.env` (or rely on defaults for development):
+
+```
+JWT_SECRET_KEY="change-me"
+JWT_ALGORITHM="HS256"
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=1440
 ```
 
-- The frontend stores the username/password in a small settings context (`SettingsContext`) and sends the `Authorization` header on every request.
-- On login, the frontend calls `GET /api/v1/users/me` to validate credentials and to discover:
-  - `id` – stored as `currentUserId`
-  - `is_admin` – stored as `currentUserIsAdmin`
-  - `department`
+Restart the FastAPI server after changing secrets. Rotate `JWT_SECRET_KEY` to invalidate all sessions.
 
-If the backend returns `401` at any point, the frontend treats the session as invalid and redirects to the login page.
+## Frontend Changes
 
-## Roles & Capabilities
+- `LoginPage` now posts to `/api/v1/auth/login`. On success it stores the token and expiry inside `SettingsContext` / localStorage (encrypted passwords are no longer required unless "remember password" was previously enabled).
+- `useHttpClient` automatically sends `Authorization: Bearer <token>` for all requests, falling back to Basic only if no token exists. When a request returns `401` due to an expired/invalid token, the stored token is cleared so the user is redirected to `/login`.
+- The logout button clears the token, expiry, and cached user identity.
 
-### Normal users
+## Activation Steps
 
-- Can:
-  - Upload files they own (with `visibility=private|department|global`).
-  - Process and index their own files.
-  - Run RAG queries and summaries against any files they have access to.
-  - View their own stats via `GET /api/v1/stats/user`.
-  - See the `Chat`, `Stats`, `Summaries`, and `Files` pages.
-- Cannot:
-  - Access `GET /api/v1/stats/system` or `/api/v1/stats/users*`.
-  - Access `/api/v1/users/*` admin management routes.
-  - Delete global files owned by other users.
+1. Deploy the updated backend and frontend.
+2. Set `JWT_SECRET_KEY` in `.env` (production) before restarting the API service.
+3. Inform users that they only need to log in once per 24h (or whatever expiry you configure). Sessions persist across browser reloads until the token expires or they log out.
+4. Optional: update automation scripts to switch from Basic Auth to Bearer tokens by calling the login endpoint first.
 
-### Admins
+## Future Enhancements
 
-- Can do everything a normal user can, plus:
-  - Manage users:
-    - `POST /api/v1/users/create`
-    - `GET /api/v1/users`
-    - `PATCH /api/v1/users/...`
-    - `DELETE /api/v1/users/users/{user_id}`
-  - View system stats:
-    - `GET /api/v1/stats/system`
-    - `GET /api/v1/stats/users`
-    - `GET /api/v1/stats/users/{user_id}`
-  - Delete any asset (including global files) as part of governance.
-
-The frontend hides admin-only pages (Admin Users, Admin Files, System/Users tabs in Stats) when `currentUserIsAdmin` is `false`, but the backend is the final authority (admin-only endpoints still validate role).
-
-## Registration & Default Projects
-
-- Public registration: `POST /api/v1/users/register`.
-  - Creates a non-admin user with default department `Global`.
-- Admin creation: `POST /api/v1/users/create`.
-  - Admin can pick `role = "user" | "admin"` and department.
-  - Admins default to department `Admins` if none is provided.
-
-On login, the frontend sets:
-
-- `defaultProjectId = String(currentUser.id)` – each user effectively has their own project id.
-- When new content is uploaded or RAG is run, that project id is used for project-specific operations; RAG retrieval itself can pull from all accessible projects (own + department + global), but the main project id is per-user.
-
-## Security Notes
-
-- Global files:
-  - Any authenticated user may read/search global content according to visibility rules.
-  - Only the owner and admins may delete global files.
-- Stats:
-  - `/api/v1/stats/system` and `/api/v1/stats/users*` are admin-only and return 403 for normal users.
-- Feedback:
-  - `/api/v1/stats/feedback` ensures that a user can only attach feedback to their own chat messages (`ChatHistory.user_id == current_user.id`).
-
+- Add refresh tokens if you need longer-lived sessions without asking users to log in again.
+- Integrate with an external IdP (OAuth/OIDC) if you later require SSO.
