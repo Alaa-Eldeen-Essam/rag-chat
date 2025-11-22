@@ -177,6 +177,74 @@ class NLPController(BaseController):
                         return cleaned
 
         return self._normalize_label_value(fallback_label)
+
+    def _extract_chunk_id_from_metadata(self, metadata: Optional[Any]) -> Optional[int]:
+        metadata_dict = self._coerce_metadata_dict(metadata)
+        if not metadata_dict:
+            return None
+        chunk_id_value = metadata_dict.get("chunk_id")
+        if chunk_id_value is None:
+            return None
+        try:
+            return int(chunk_id_value)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_scored_doc_map(self, documents: List[RetrievedDocument]):
+        if not documents:
+            return {}
+        raw_scores = [float(getattr(doc, "score", 0.0) or 0.0) for doc in documents]
+        score_min, score_max = min(raw_scores), max(raw_scores)
+        denom = (score_max - score_min) or 1.0
+        scored_map = {}
+        for idx, doc in enumerate(documents):
+            norm = 1.0 if score_max == score_min else (
+                (float(getattr(doc, "score", 0.0) or 0.0) - score_min) / denom
+            )
+            chunk_id = self._extract_chunk_id_from_metadata(getattr(doc, "metadata", None))
+            identifier = str(chunk_id) if chunk_id is not None else f"fallback_{idx}_{hash(doc.text)}"
+            scored_map[identifier] = {"doc": doc, "score": norm}
+        return scored_map
+
+    def _fuse_dense_and_lexical_results(
+        self,
+        dense_docs: Optional[List[RetrievedDocument]],
+        lexical_docs: Optional[List[RetrievedDocument]],
+        limit: int,
+        dense_weight: float = 0.6,
+    ) -> List[RetrievedDocument]:
+        dense_docs = dense_docs or []
+        lexical_docs = lexical_docs or []
+
+        if not dense_docs and not lexical_docs:
+            return []
+        if not lexical_docs:
+            return dense_docs[:limit]
+        if not dense_docs:
+            return lexical_docs[:limit]
+
+        dense_map = self._build_scored_doc_map(dense_docs)
+        lexical_map = self._build_scored_doc_map(lexical_docs)
+
+        combined: Dict[str, Dict[str, Any]] = {}
+        for key, payload in dense_map.items():
+            combined[key] = {"doc": payload["doc"], "dense": payload["score"], "lex": 0.0}
+        for key, payload in lexical_map.items():
+            entry = combined.setdefault(key, {"doc": payload["doc"], "dense": 0.0, "lex": 0.0})
+            entry["lex"] = max(entry["lex"], payload["score"])
+            if entry["doc"] is None:
+                entry["doc"] = payload["doc"]
+
+        fused: List[RetrievedDocument] = []
+        lexical_weight = max(0.0, min(1.0, 1.0 - dense_weight))
+        for payload in combined.values():
+            doc = payload["doc"]
+            fused_score = dense_weight * payload["dense"] + lexical_weight * payload["lex"]
+            doc.score = fused_score
+            fused.append(doc)
+
+        fused.sort(key=lambda d: getattr(d, "score", 0.0), reverse=True)
+        return fused[:limit]
     
     async def index_into_vector_db(self, project: Project, chunks: List[DataChunk],
                                    chunks_ids: List[int], 
@@ -250,7 +318,20 @@ class NLPController(BaseController):
         )
 
         if not results:
-            return False
+            results = []
+
+        lexical_results: List[RetrievedDocument] = []
+        text_query = (text or "").strip()
+        if text_query:
+            lexical_results = await self.vectordb_client.search_by_text(
+                collection_name=collection_name,
+                query=text_query,
+                limit=limit
+            )
+
+        results = self._fuse_dense_and_lexical_results(results, lexical_results, limit)
+        if not results:
+            return []
 
         if doc_types:
             doc_types_normalized = {dt.lower() for dt in doc_types}
