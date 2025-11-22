@@ -48,6 +48,8 @@ Mini RAG now combines **dense embeddings**, **lexical/BM25 scoring**, and the ex
 
 - Existing filters (doc type, asset IDs, keyword constraints) run on the fused list,
   so hybrid retrieval still respects the UI scope and visibility restrictions.
+- Each chunk’s metadata now also carries a `page_number` (populated during chunking),
+  making it easy to surface page references alongside the retrieved excerpt.
 
 ---
 

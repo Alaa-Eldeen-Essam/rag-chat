@@ -163,9 +163,18 @@ class ProcessController(BaseController):
         sentence_texts: List[str] = []
         sentence_metas: List[dict] = []
 
-        for rec in file_content:
+        for page_idx, rec in enumerate(file_content):
             text = getattr(rec, "page_content", "") or ""
-            meta = getattr(rec, "metadata", {}) or {}
+            raw_meta = getattr(rec, "metadata", {}) or {}
+            meta = dict(raw_meta)
+
+            if "page_number" not in meta:
+                page_from_meta = meta.get("page")
+                try:
+                    page_int = int(page_from_meta)
+                except (TypeError, ValueError):
+                    page_int = None
+                meta["page_number"] = page_int if page_int is not None else page_idx + 1
 
             # Split into sentence-ish segments using punctuation and newlines.
             parts = re.split(r'(?<=[\.\!\؟\!؟])\s+|\n+', text)
