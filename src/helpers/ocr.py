@@ -193,3 +193,59 @@ def extract_pdf_text_with_ocr(path: str, lang: str, max_pages: Optional[int] = N
     # OCR path
     text = ocr_pdf_to_text(path=path, lang=lang, max_pages=max_pages, dpi=dpi)
     return text, True
+
+
+def extract_pdf_pages_with_ocr(
+    path: str,
+    lang: str,
+    max_pages: Optional[int] = None,
+    dpi: int = 300,
+) -> List[Tuple[str, Dict]]:
+    """
+    Extract PDF text page‑by‑page, falling back to OCR when needed.
+
+    Returns a list of (text, metadata) where metadata at least contains:
+      - page: 1‑based page index
+      - ocr_used: bool
+      - ocr_lang: language string (when OCR is used)
+    """
+    results: List[Tuple[str, Dict]] = []
+
+    needs_ocr = requires_ocr_for_pdf(path)
+    if not needs_ocr:
+        # Try to use the embedded text layer, per page.
+        try:
+            doc = fitz.open(path)
+        except Exception as exc:
+            logger.error("Failed to open PDF '%s' for page-wise text extraction: %s", path, exc)
+            needs_ocr = True
+        else:
+            try:
+                page_count = doc.page_count
+                last_page = page_count if max_pages is None else min(page_count, max_pages)
+                for page_index in range(last_page):
+                    page = doc.load_page(page_index)
+                    text = _clean_utf8_text(page.get_text() or "")
+                    if not text:
+                        continue
+                    meta: Dict = {"page": page_index + 1, "ocr_used": False, "ocr_lang": lang or "eng"}
+                    results.append((text, meta))
+            finally:
+                doc.close()
+
+    # If we determined that OCR is required (no usable text layer), use OCR per page.
+    if needs_ocr or not results:
+        ocr_pages = ocr_pdf_file(path=path, lang=lang, max_pages=max_pages, dpi=dpi)
+        for text, meta in ocr_pages:
+            cleaned = _clean_utf8_text(text)
+            if not cleaned:
+                continue
+            # Ensure minimal metadata contract.
+            meta = meta or {}
+            if "page" not in meta:
+                meta["page"] = len(results) + 1
+            meta.setdefault("ocr_used", True)
+            meta.setdefault("ocr_lang", lang or "eng")
+            results.append((cleaned, meta))
+
+    return results

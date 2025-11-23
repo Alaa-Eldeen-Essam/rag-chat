@@ -25,5 +25,12 @@ class ChatHistory(SQLAlchemyBase):
     retrieved_doc_types = Column(JSONB, nullable=True)
     retrieved_asset_ids = Column(JSONB, nullable=True)
 
+    # Persisted list of resources (RAG evidence) associated with this
+    # exchange so that the frontend can re-display them when loading
+    # conversation history. Each item is expected to mirror the
+    # structure of the `sources` list returned at answer time
+    # (file_name, location, page, excerpt_index, snippet, ...).
+    resources = Column(JSONB, nullable=True)
+
     user = relationship("User", back_populates="chat_history")
     conversation = relationship("ChatConversation", back_populates="history")

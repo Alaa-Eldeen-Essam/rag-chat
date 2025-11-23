@@ -391,6 +391,7 @@ async def get_conversation_history(
             "doc_types": record.doc_types,
             "timestamp": record.timestamp.isoformat() if record.timestamp else None,
             "response_time_ms": record.response_time_ms,
+            "resources": getattr(record, "resources", None) or [],
         }
         for record in history
     ]
@@ -1012,7 +1013,8 @@ async def answer_rag(
 
     def build_sources(max_sources: int = 15) -> List[Dict[str, str]]:
         sources: List[Dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
+        # Deduplicate by chunk_id when available, instead of by (file, page).
+        seen_ids: set[int] = set()
 
         if not retrieved_documents:
             return sources
@@ -1059,14 +1061,21 @@ async def answer_rag(
             else:
                 location = f"Excerpt {idx + 1}"
 
-            key = (str(file_name), location)
-            if key in seen:
+            # Use chunk_id (if present) to avoid collapsing multiple chunks
+            # from the same file & page into a single source.
+            chunk_id_value = meta_dict.get("chunk_id")
+            key_id: int
+            try:
+                key_id = int(chunk_id_value) if chunk_id_value is not None else idx + 1
+            except (TypeError, ValueError):
+                key_id = idx + 1
+            if key_id in seen_ids:
                 continue
-            seen.add(key)
+            seen_ids.add(key_id)
 
-            snippet = text.strip().replace("\n", " ")
-            if len(snippet) > 280:
-                snippet = snippet[:277] + "..."
+            # Use the full chunk text as the snippet so that
+            # resources expose the complete retrieved evidence.
+            snippet = (text or "").strip()
 
             sources.append(
                 {
@@ -1165,6 +1174,7 @@ async def answer_rag(
                     retrieved_chunks=retrieved_chunks_count,
                     retrieved_doc_types=retrieved_doc_types or None,
                     retrieved_asset_ids=retrieved_asset_ids or None,
+                    resources=[],
                 )
                 await conversation_model.touch_conversation(conversation.conversation_id)
 
@@ -1241,6 +1251,7 @@ async def answer_rag(
                             retrieved_chunks=retrieved_chunks_count,
                             retrieved_doc_types=retrieved_doc_types or None,
                             retrieved_asset_ids=retrieved_asset_ids or None,
+                            resources=answer_sources or None,
                         )
                         await conversation_model.touch_conversation(conversation.conversation_id)
 
@@ -1276,6 +1287,7 @@ async def answer_rag(
             retrieved_chunks=retrieved_chunks_count,
             retrieved_doc_types=retrieved_doc_types or None,
             retrieved_asset_ids=retrieved_asset_ids or None,
+            resources=[],
         )
         await conversation_model.touch_conversation(conversation.conversation_id)
 
@@ -1365,6 +1377,7 @@ async def answer_rag(
         retrieved_chunks=retrieved_chunks_count,
         retrieved_doc_types=retrieved_doc_types or None,
         retrieved_asset_ids=retrieved_asset_ids or None,
+        resources=answer_sources or None,
     )
     await conversation_model.touch_conversation(conversation.conversation_id)
 

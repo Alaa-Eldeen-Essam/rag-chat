@@ -35,6 +35,7 @@ Restart the FastAPI server after changing secrets. Rotate `JWT_SECRET_KEY` to in
 - `LoginPage` now posts to `/api/v1/auth/login`. On success it stores the token and expiry inside `SettingsContext` / localStorage (encrypted passwords are no longer required unless "remember password" was previously enabled).
 - `useHttpClient` automatically sends `Authorization: Bearer <token>` for all requests, falling back to Basic only if no token exists. When a request returns `401` due to an expired/invalid token, the stored token is cleared so the user is redirected to `/login`.
 - The logout button clears the token, expiry, and cached user identity.
+- Route protection now checks for either stored basic credentials or a valid (non-expired) token so refreshing the page keeps you signed in until the token expires.
 
 ## Activation Steps
 

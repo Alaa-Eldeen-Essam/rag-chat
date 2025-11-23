@@ -34,6 +34,7 @@ class ChatHistoryModel(BaseDataModel):
         retrieved_chunks: Optional[int] = None,
         retrieved_doc_types: Optional[List[str]] = None,
         retrieved_asset_ids: Optional[List[int]] = None,
+        resources: Optional[list] = None,
     ):
         async with self.db_client() as session:
             async with session.begin():
@@ -51,6 +52,7 @@ class ChatHistoryModel(BaseDataModel):
                     retrieved_chunks=retrieved_chunks,
                     retrieved_doc_types=retrieved_doc_types,
                     retrieved_asset_ids=retrieved_asset_ids,
+                    resources=resources,
                 )
                 session.add(record)
             await session.commit()

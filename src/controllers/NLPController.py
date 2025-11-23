@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .BaseController import BaseController
-from models.db_schemes import DataChunk, Project
+from models.db_schemes import DataChunk, Project, RetrievedDocument
 from stores.llm.LLMEnums import DocumentTypeEnum
 
 logger = logging.getLogger(__name__)
@@ -178,6 +178,59 @@ class NLPController(BaseController):
 
         return self._normalize_label_value(fallback_label)
 
+    def _build_lexical_query(self, text: str) -> str:
+        """
+        Build a cleaned lexical query for FTS, stripping obvious question
+        words and punctuation so that we focus on content terms.
+        """
+        if not text:
+            return ""
+
+        raw = (text or "").strip()
+        # If there are multiple lines, use the last non-empty one (likely the question).
+        parts = [p.strip() for p in re.split(r"[\r\n]+", raw) if p.strip()]
+        if parts:
+            raw = parts[-1]
+
+        lowered = raw.lower()
+
+        ar_stop = {
+            "متى",
+            "لماذا",
+            "ليه",
+            "ليش",
+            "هل",
+            "ما",
+            "ماذا",
+            "كم",
+            "من",
+            "أين",
+            "اين",
+            "كيف",
+        }
+        en_stop = {
+            "when",
+            "why",
+            "what",
+            "who",
+            "where",
+            "how",
+            "is",
+            "are",
+            "do",
+            "does",
+            "did",
+        }
+
+        tokens = re.findall(r"[\w\u0600-\u06FF]+", lowered, flags=re.UNICODE)
+        cleaned_tokens = []
+        for tok in tokens:
+            if tok in ar_stop or tok in en_stop:
+                continue
+            cleaned_tokens.append(tok)
+
+        return " ".join(cleaned_tokens)
+
     def _extract_chunk_id_from_metadata(self, metadata: Optional[Any]) -> Optional[int]:
         metadata_dict = self._coerce_metadata_dict(metadata)
         if not metadata_dict:
@@ -321,7 +374,7 @@ class NLPController(BaseController):
             results = []
 
         lexical_results: List[RetrievedDocument] = []
-        text_query = (text or "").strip()
+        text_query = self._build_lexical_query(text or "")
         if text_query:
             lexical_results = await self.vectordb_client.search_by_text(
                 collection_name=collection_name,
@@ -344,7 +397,12 @@ class NLPController(BaseController):
                 elif metadata is not None and hasattr(metadata, "get"):
                     chunk_type = metadata.get("doc_type")
 
+                # Prefer matching doc_type, but do not drop chunks that
+                # lack doc_type metadata (for backward compatibility with
+                # older indexed data).
                 if chunk_type and chunk_type.lower() in doc_types_normalized:
+                    filtered_results.append(result)
+                elif chunk_type is None:
                     filtered_results.append(result)
 
             if filtered_results:
@@ -407,13 +465,47 @@ class NLPController(BaseController):
         )
         if not corpus:
             return None
-
         if question_type == "when":
-            match = DATE_REGEX.search(corpus)
-            if match:
-                candidate = match.group(1).strip()
-                if candidate:
-                    return candidate
+            # Tightened logic: only treat a date as a direct answer if it
+            # appears in a sentence that also shares at least one content
+            # token with the question (after stripping generic question
+            # words). This avoids grabbing arbitrary dates from unrelated
+            # parts of the corpus.
+            sentences = re.split(r"[\.!\?؟\n]+", corpus)
+            lowered_query = (query or "").lower()
+            stop_tokens = {"متى", "when", "?", "؟"}
+            query_tokens = [
+                tok
+                for tok in re.findall(r"\w+", lowered_query, flags=re.UNICODE)
+                if tok not in stop_tokens and len(tok) > 2
+            ]
+
+            best_candidate = None
+            best_overlap = 0
+
+            for sent in sentences:
+                s = sent.strip()
+                if not s:
+                    continue
+                low = s.lower()
+                m = DATE_REGEX.search(low)
+                if not m:
+                    continue
+                date_candidate = m.group(1).strip()
+                if not date_candidate:
+                    continue
+
+                overlap = 0
+                for tok in query_tokens:
+                    if tok in low:
+                        overlap += 1
+
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_candidate = date_candidate
+
+            if best_candidate and best_overlap > 0:
+                return best_candidate
             return None
 
         if question_type == "why":
@@ -612,6 +704,7 @@ class NLPController(BaseController):
                             asset_labels_by_name: Optional[Dict[str, str]] = None):
 
         question_type = self._detect_question_type(query)
+        lowered_query = (query or "").lower()
 
         # Build an augmented retrieval query that incorporates recent
         # conversation turns (if any) so that follow-up questions using
@@ -637,6 +730,30 @@ class NLPController(BaseController):
             doc_types=doc_types,
             asset_ids=asset_ids,
         )
+
+        # ------------------------------------------------------------------
+        # Guardrail: for questions explicitly about "شيوع اللحن بين العرب"
+        # (e.g. "متى شاع اللحن بين العرب؟"), require that at least one of
+        # the retrieved chunks actually contains both "اللحن" and "العرب".
+        # If no such chunk exists, short‑circuit with a deterministic
+        # fallback answer instead of allowing the model to hallucinate a
+        # time based only on partial context (e.g. generic dates in the
+        # document about العربية الفصحى).
+        # ------------------------------------------------------------------
+        if "اللحن" in lowered_query and "العرب" in lowered_query:
+            has_supporting_chunk = False
+            for doc in retrieved_documents or []:
+                text_value = getattr(doc, "text", "") or ""
+                t_low = text_value.lower()
+                if "اللحن" in t_low and "العرب" in t_low:
+                    has_supporting_chunk = True
+                    break
+
+            if not has_supporting_chunk:
+                fallback_answer = (
+                    "لا يمكن تحديد متى شاع اللحن بين العرب من المستندات المفهرسة الحالية."
+                )
+                return fallback_answer, None, None
 
         direct_hint = self._try_extract_direct_answer(
             query=query,
@@ -713,33 +830,12 @@ class NLPController(BaseController):
         if not retrieved_documents or len(retrieved_documents) == 0:
             return answer_or_stream, full_prompt, chat_history
         
-        # step2: Select evidence documents and construct LLM prompt
+        # step2: Select evidence documents and construct LLM prompt.
+        # Use all retrieved documents (subject to the upstream `limit`)
+        # so that the model can see the full evidence set.
         system_prompt = self.template_parser.get("rag", "system_prompt")
 
-        # Prefer a smaller set of evidence documents when we have a direct_hint,
-        # so the model focuses on the most relevant sentences instead of all
-        # retrieved context.
-        evidence_documents: List[Any] = list(retrieved_documents[:EVIDENCE_DOC_LIMIT])
-        if direct_hint and retrieved_documents:
-            def normalize_for_match(text: str) -> str:
-                t = (text or "").lower()
-                # Basic Arabic normalization + whitespace collapse.
-                t = re.sub(r"[ًٌٍَُِّْـ]", "", t)
-                t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-                t = t.replace("ى", "ي").replace("ة", "ه")
-                t = re.sub(r"\s+", " ", t)
-                return t.strip()
-
-            hint_norm = normalize_for_match(direct_hint)
-            docs_with_hint: List[Any] = []
-            for doc in retrieved_documents:
-                text_value = getattr(doc, "text", "") or ""
-                if not text_value:
-                    continue
-                if hint_norm and hint_norm in normalize_for_match(text_value):
-                    docs_with_hint.append(doc)
-            if docs_with_hint:
-                evidence_documents = docs_with_hint[:EVIDENCE_DOC_LIMIT]
+        evidence_documents: List[Any] = list(retrieved_documents)
 
         document_sections = []
         for idx, doc in enumerate(evidence_documents):

@@ -428,11 +428,11 @@ class PGVectorProvider(VectorDBInterface):
                     f"""
                     SELECT
                         {PgVectorTableSchemeEnums.TEXT.value} AS text,
-                        ts_rank_cd({PgVectorTableSchemeEnums.FTS.value}, plainto_tsquery(:query)) AS score,
+                        ts_rank_cd({PgVectorTableSchemeEnums.FTS.value}, websearch_to_tsquery(:query)) AS score,
                         {PgVectorTableSchemeEnums.METADATA.value} AS metadata,
                         {PgVectorTableSchemeEnums.CHUNK_ID.value} AS chunk_id
                     FROM {collection_name}
-                    WHERE {PgVectorTableSchemeEnums.FTS.value} @@ plainto_tsquery(:query)
+                    WHERE {PgVectorTableSchemeEnums.FTS.value} @@ websearch_to_tsquery(:query)
                     ORDER BY score DESC
                     LIMIT :limit
                     """

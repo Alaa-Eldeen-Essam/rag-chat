@@ -10,7 +10,7 @@ from .BaseController import BaseController
 from .ProjectController import ProjectController
 from helpers.ocr import (
     ocr_image_file,
-    extract_pdf_text_with_ocr,
+    extract_pdf_pages_with_ocr,
 )
 from models import ProcessingEnum
 
@@ -105,20 +105,27 @@ class ProcessController(BaseController):
 
         # PDF handling with OCR detection
         if file_ext == ProcessingEnum.PDF.value:
-            text, used_ocr = extract_pdf_text_with_ocr(
+            pages = extract_pdf_pages_with_ocr(
                 path=file_path,
                 lang=getattr(self.app_settings, "OCR_LANGS", "eng"),
                 max_pages=getattr(self.app_settings, "OCR_MAX_PAGES", None),
                 dpi=getattr(self.app_settings, "OCR_DPI", 300) or 300,
             )
-            text = (text or "").strip()
-            if not text:
+            if not pages:
                 return None
-            meta = {}
-            if used_ocr:
-                meta["ocr_used"] = True
-                meta["ocr_lang"] = getattr(self.app_settings, "OCR_LANGS", "eng")
-            return [Document(page_content=text, metadata=meta)]
+
+            docs: list[Document] = []
+            for text, meta in pages:
+                text = (text or "").strip()
+                if not text:
+                    continue
+                docs.append(
+                    Document(
+                        page_content=text,
+                        metadata=meta or {},
+                    )
+                )
+            return docs
 
         loader = self.get_file_loader(file_id=file_id)
         docs = loader.load() if loader else None
@@ -150,8 +157,8 @@ class ProcessController(BaseController):
         self,
         file_content: list,
         file_id: str,
-        chunk_size: int = 400,
-        overlap_size: int = 50,
+        chunk_size: int = 500,
+        overlap_size: int = 100,
     ):
         """
         Turn raw file pages into sentence-like segments first, then group them
@@ -182,7 +189,10 @@ class ProcessController(BaseController):
                 s = (s or "").strip()
                 if len(s) > 1:
                     sentence_texts.append(s)
-                    sentence_metas.append(meta)
+                    # Store a shallow copy so that later per‑sentence / per‑chunk
+                    # adjustments to metadata (like page_number) do not alias
+                    # across different sentences or pages.
+                    sentence_metas.append(dict(meta))
 
         if not sentence_texts:
             return []
@@ -224,8 +234,35 @@ class ProcessController(BaseController):
             if len(s) <= 1:
                 continue
 
+            meta = meta or {}
+
+            # If we are aggregating sentences and suddenly see a sentence whose
+            # page_number differs from the current chunk's page_number, flush
+            # the current chunk first so that each chunk is associated with a
+            # single logical page. This keeps page_number accurate for PDFs
+            # (both text‑layer and OCR paths).
+            if (
+                current_sentences
+                and current_meta
+                and meta.get("page_number") is not None
+                and current_meta.get("page_number") is not None
+                and meta.get("page_number") != current_meta.get("page_number")
+            ):
+                chunk_text = splitter_tag.join(current_sentences).strip()
+                if chunk_text:
+                    chunks.append(
+                        Document(
+                            page_content=chunk_text,
+                            metadata=current_meta or {},
+                        )
+                    )
+                # Start a fresh chunk on the new page.
+                current_sentences = []
+                current_len = 0
+                current_meta = {}
+
             if not current_sentences:
-                current_meta = meta or {}
+                current_meta = meta
 
             current_sentences.append(s)
             current_len += len(s) + len(splitter_tag)
@@ -264,6 +301,16 @@ class ProcessController(BaseController):
                     metadata=current_meta or {},
                 )
             )
+        # Fallback: if any resulting chunk lacks an explicit page_number
+        # (e.g., non‑PDF sources or legacy metadata), assign sequential
+        # page numbers based on chunk order so that downstream consumers
+        # can still display a sensible location reference.
+        if chunks:
+            for idx, doc in enumerate(chunks):
+                meta = getattr(doc, "metadata", None) or {}
+                if meta.get("page_number") is None:
+                    meta["page_number"] = idx + 1
+                doc.metadata = meta
 
         return chunks
     
