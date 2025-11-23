@@ -1,5 +1,9 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from routes import auth, base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
@@ -99,3 +103,21 @@ app.include_router(data.data_router)
 app.include_router(nlp.nlp_router)
 app.include_router(users.users_router)
 app.include_router(stats.stats_router)
+
+# --- Frontend static serving (built React app) ---
+frontend_dist_path = (
+    Path(__file__).resolve().parent.parent / "frontend" / "dist"
+)
+
+if frontend_dist_path.exists():
+    # Serve the built frontend under `/app`
+    app.mount(
+        "/app",
+        StaticFiles(directory=str(frontend_dist_path), html=True),
+        name="frontend",
+    )
+
+    # Redirect bare root `/` to the SPA entry point.
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/app")
