@@ -105,19 +105,23 @@ app.include_router(users.users_router)
 app.include_router(stats.stats_router)
 
 # --- Frontend static serving (built React app) ---
-frontend_dist_path = (
-    Path(__file__).resolve().parent.parent / "frontend" / "dist"
-)
+# Support both local dev layout (src/main.py, frontend/dist at project root)
+# and Docker layout (/app/main.py, frontend/dist under /app).
+src_dir = Path(__file__).resolve().parent
+frontend_candidates = [
+    src_dir.parent / "frontend" / "dist",  # e.g. repo_root/frontend/dist
+    src_dir / "frontend" / "dist",         # e.g. /app/frontend/dist in Docker
+]
 
-if frontend_dist_path.exists():
-    # Serve the built frontend under `/app`
+frontend_dist_path = next((p for p in frontend_candidates if p.exists()), None)
+
+if frontend_dist_path is not None:
     app.mount(
         "/app",
         StaticFiles(directory=str(frontend_dist_path), html=True),
         name="frontend",
     )
 
-    # Redirect bare root `/` to the SPA entry point.
     @app.get("/", include_in_schema=False)
     async def root_redirect():
         return RedirectResponse(url="/app")

@@ -5,8 +5,6 @@ services:
       context: ..
       dockerfile: docker/minirag/Dockerfile
     container_name: fastapi
-    ports:
-      - "5000:5000"
     volumes:
       - fastapi_data:/app/assets
     networks:
@@ -19,6 +17,19 @@ services:
       - ./env/.env.app
     environment:
       - POSTGRES_HOST=pgvector
+
+  # Ollama Service (LLM backend)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - backend
+    restart: always
+    gpus: all
 
   # Nginx Service
   nginx:
@@ -76,3 +87,4 @@ networks:
 volumes:
   fastapi_data:
   pgvector:
+  ollama_data:

@@ -2,6 +2,7 @@ from .BaseDataModel import BaseDataModel
 from .db_schemes import User
 from sqlalchemy.future import select
 from sqlalchemy import func, update
+from sqlalchemy.exc import IntegrityError
 
 class UserModel(BaseDataModel):
 
@@ -59,10 +60,41 @@ class UserModel(BaseDataModel):
             await session.commit()
 
     async def ensure_initial_admin(self, username: str, password_hash: str):
-        user_count = await self.count_users()
-        if user_count and user_count > 0:
-            return
-        await self.create_user(username=username, password_hash=password_hash, is_admin=True)
+        """
+        Ensure there is an initial admin user with the given username.
+
+        This method is written to be idempotent and safe under concurrent
+        startup (for example when multiple Uvicorn workers are used). It
+        checks for an existing user with the target username inside a
+        transaction and only creates one if missing, swallowing a unique
+        constraint error if another worker raced to create it.
+        """
+        async with self.db_client() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(User).where(User.username == username)
+                )
+                existing = result.scalar_one_or_none()
+                if existing:
+                    return existing
+
+                user = User(
+                    username=username,
+                    password_hash=password_hash,
+                    is_admin=True,
+                    department="Global",
+                )
+                session.add(user)
+
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Another worker likely created this admin concurrently.
+                await session.rollback()
+                return await self.get_user_by_username(username)
+            else:
+                await session.refresh(user)
+                return user
 
     async def update_department(self, user_id: int, department: str):
         async with self.db_client() as session:
