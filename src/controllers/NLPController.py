@@ -44,14 +44,21 @@ EVIDENCE_CHAR_BUDGET = 4000
 
 class NLPController(BaseController):
 
-    def __init__(self, vectordb_client, generation_client, 
-                 embedding_client, template_parser):
+    def __init__(
+        self,
+        vectordb_client,
+        generation_client,
+        embedding_client,
+        template_parser,
+        search_client=None,
+    ):
         super().__init__()
 
         self.vectordb_client = vectordb_client
         self.generation_client = generation_client
         self.embedding_client = embedding_client
         self.template_parser = template_parser
+        self.search_client = search_client
 
     def create_collection_name(self, project_id: str):
         return f"collection_{self.vectordb_client.default_vector_size}_{project_id}".strip()
@@ -299,10 +306,14 @@ class NLPController(BaseController):
         fused.sort(key=lambda d: getattr(d, "score", 0.0), reverse=True)
         return fused[:limit]
     
-    async def index_into_vector_db(self, project: Project, chunks: List[DataChunk],
-                                   chunks_ids: List[int], 
-                                   do_reset: bool = False):
-        
+    async def index_into_vector_db(
+        self,
+        project: Project,
+        chunks: List[DataChunk],
+        chunks_ids: List[int],
+        do_reset: bool = False,
+    ):
+
         # step1: get collection name
         collection_name = self.create_collection_name(project_id=project.project_id)
 
@@ -333,6 +344,40 @@ class NLPController(BaseController):
             vectors=vectors,
             record_ids=chunks_ids,
         )
+
+        # step5: index into search backend (Elasticsearch) when available
+        if self.search_client is not None:
+            try:
+                index_name = self.search_client.get_index_name(project.project_id)
+                documents = []
+                for chunk in chunks:
+                    meta = chunk.chunk_metadata or {}
+                    page_value = meta.get("page") or meta.get("page_number")
+                    original_filename = (
+                        meta.get("original_filename")
+                        or meta.get("source_name")
+                        or ""
+                    )
+                    doc = {
+                        "chunk_id": getattr(chunk, "chunk_id", None),
+                        "project_id": getattr(chunk, "chunk_project_id", None),
+                        "asset_id": getattr(chunk, "chunk_asset_id", None),
+                        "doc_type": meta.get("doc_type") or meta.get("document_type"),
+                        "text": chunk.chunk_text,
+                        "page": page_value,
+                        "page_number": page_value,
+                        "original_filename": original_filename,
+                        "metadata": meta,
+                    }
+                    documents.append(doc)
+
+                if documents:
+                    await self.search_client.index_documents(
+                        index_name=index_name,
+                        documents=documents,
+                    )
+            except Exception as exc:
+                logger.error("Failed to index chunks into search backend: %s", exc)
 
         return True
 
@@ -376,11 +421,49 @@ class NLPController(BaseController):
         lexical_results: List[RetrievedDocument] = []
         text_query = self._build_lexical_query(text or "")
         if text_query:
-            lexical_results = await self.vectordb_client.search_by_text(
-                collection_name=collection_name,
-                query=text_query,
-                limit=limit
-            )
+            # Prefer Elasticsearch for lexical retrieval when available.
+            if self.search_client is not None:
+                try:
+                    index_name = self.search_client.get_index_name(project.project_id)
+                    filters: Dict[str, Any] = {"project_id": project.project_id}
+                    es_hits = await self.search_client.search(
+                        index_name=index_name,
+                        query=text_query,
+                        filters=filters,
+                        size=limit,
+                    )
+                    for hit in es_hits:
+                        text_value = hit.get("text") or ""
+                        score_value = float(hit.get("_score") or 0.0)
+                        meta: Dict[str, Any] = hit.get("metadata") or {}
+                        # Ensure key metadata fields are available for downstream filters.
+                        for key in (
+                            "asset_id",
+                            "doc_type",
+                            "document_type",
+                            "chunk_id",
+                            "page",
+                            "page_number",
+                            "original_filename",
+                        ):
+                            if key not in meta and key in hit:
+                                meta[key] = hit.get(key)
+
+                        lexical_results.append(
+                            RetrievedDocument(
+                                text=text_value,
+                                score=score_value,
+                                metadata=meta,
+                            )
+                        )
+                except Exception as exc:
+                    logger.error("Elasticsearch lexical search failed: %s", exc)
+            else:
+                lexical_results = await self.vectordb_client.search_by_text(
+                    collection_name=collection_name,
+                    query=text_query,
+                    limit=limit
+                )
 
         results = self._fuse_dense_and_lexical_results(results, lexical_results, limit)
         if not results:

@@ -46,6 +46,21 @@ services:
     restart: always
 
 
+  # Elasticsearch (search backend)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - backend
+    restart: always
+
+
   # PostgreSQL (pgvector)
   pgvector:
     image: pgvector/pgvector:0.8.0-pg17
@@ -88,3 +103,4 @@ volumes:
   fastapi_data:
   pgvector:
   ollama_data:
+  elasticsearch_data:

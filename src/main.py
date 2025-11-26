@@ -9,6 +9,7 @@ from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
+from stores.search import SearchProviderFactory
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from models.UserModel import UserModel
@@ -38,6 +39,7 @@ async def startup_span():
 
     llm_provider_factory = LLMProviderFactory(settings)
     vectordb_provider_factory = VectorDBProviderFactory(config=settings, db_client=app.db_client)
+    search_provider_factory = SearchProviderFactory(settings)
 
     generation_models = {
         "best": settings.BEST_GENERATION_MODEL_ID or settings.GENERATION_MODEL_ID,
@@ -77,6 +79,11 @@ async def startup_span():
     )
     await app.vectordb_client.connect()
 
+    # search client (Elasticsearch)
+    app.search_client = search_provider_factory.create()
+    if app.search_client is not None:
+        await app.search_client.connect()
+
     app.template_parser = TemplateParser(
         language=settings.PRIMARY_LANG,
         default_language=settings.DEFAULT_LANG,
@@ -93,6 +100,9 @@ async def startup_span():
 async def shutdown_span():
     app.db_engine.dispose()
     await app.vectordb_client.disconnect()
+    search_client = getattr(app, "search_client", None)
+    if search_client is not None:
+        await search_client.disconnect()
 
 app.on_event("startup")(startup_span)
 app.on_event("shutdown")(shutdown_span)

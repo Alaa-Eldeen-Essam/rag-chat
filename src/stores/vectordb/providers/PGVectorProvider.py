@@ -141,7 +141,10 @@ class PGVectorProvider(VectorDBInterface):
                     await session.execute(create_sql)
                     await session.commit()
 
-        await self.ensure_text_search_support(collection_name=collection_name)
+        # Lexical search is now handled primarily by Elasticsearch. We no longer
+        # create or maintain a Postgres FTS column/index eagerly here; FTS
+        # support is only enabled on-demand when search_by_text is used as a
+        # fallback in environments without Elasticsearch.
         return True
 
     async def ensure_text_search_support(self, collection_name: str) -> None:

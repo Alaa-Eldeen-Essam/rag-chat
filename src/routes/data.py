@@ -313,6 +313,7 @@ async def upload_process_index(
         generation_client=request.app.generation_client,
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
+        search_client=getattr(request.app, "search_client", None),
     )
 
     indexed = await nlp_controller.index_into_vector_db(
@@ -546,6 +547,7 @@ async def upload_process_index_batch(
             generation_client=request.app.generation_client,
             embedding_client=request.app.embedding_client,
             template_parser=request.app.template_parser,
+            search_client=getattr(request.app, "search_client", None),
         )
 
         indexed = await nlp_controller.index_into_vector_db(
@@ -619,6 +621,7 @@ async def process_endpoint(
         generation_client=request.app.generation_client,
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
+        search_client=getattr(request.app, "search_client", None),
     )
     if project is None:
         response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
@@ -884,6 +887,7 @@ async def delete_asset(
             generation_client=request.app.generation_client,
             embedding_client=request.app.embedding_client,
             template_parser=request.app.template_parser,
+            search_client=getattr(request.app, "search_client", None),
         )
         collection_name = nlp_controller.create_collection_name(
             project_id=asset_record.asset_project_id
