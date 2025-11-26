@@ -62,14 +62,14 @@ async def startup_span():
     app.generation_clients = {}
 
     for key, model_id in generation_models.items():
-        client = llm_provider_factory.create(provider=settings.GENERATION_BACKEND)
+        client = llm_provider_factory.create_generation_client()
         client.set_generation_model(model_id=model_id)
         app.generation_clients[key] = client
 
     app.generation_client = app.generation_clients[default_model_key]
 
     # embedding client
-    app.embedding_client = llm_provider_factory.create(provider=settings.EMBEDDING_BACKEND)
+    app.embedding_client = llm_provider_factory.create_embedding_client()
     app.embedding_client.set_embedding_model(model_id=settings.EMBEDDING_MODEL_ID,
                                              embedding_size=settings.EMBEDDING_MODEL_SIZE)
     

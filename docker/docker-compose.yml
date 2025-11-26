@@ -31,6 +31,22 @@ services:
     restart: always
     gpus: all
 
+  # vLLM Service (alternative LLM backend with OpenAI-compatible API)
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    command: >
+      python -m vllm.entrypoints.openai.api_server
+      --host 0.0.0.0
+      --port 8000
+      --model ${VLLM_MODEL_NAME}
+    ports:
+      - "8000:8000"
+    networks:
+      - backend
+    restart: always
+    gpus: all
+
   # Nginx Service
   nginx:
     image: nginx:stable-alpine3.20-perl

@@ -1,75 +1,109 @@
 # Docker Setup for MiniRAG Application
 
-This directory contains the Docker setup for the MiniRAG application, including all necessary services for development and monitoring.
+This directory contains the Docker setup for the MiniRAG application, including the API, web UI, vector database, search, and local LLM backends.
 
-## Services
+## Services (docker-compose.yml)
 
-- **FastAPI Application**: Main application running on Uvicorn
-- **Nginx**: Web server for serving the FastAPI application
-- **PostgreSQL (pgvector)**: Vector-enabled database for storing embeddings
-- **Postgres-Exporter**: Exports PostgreSQL metrics for Prometheus
-- **Qdrant**: Vector database for similarity search
-- **Prometheus**: Metrics collection
-- **Grafana**: Visualization dashboard for metrics
-- **Node-Exporter**: System metrics collection
+- **FastAPI Application (`fastapi`)**  
+  Main backend (RAG, auth, indexing, API) running on Uvicorn (internal port `5000`).
+
+- **Nginx (`nginx`)**  
+  Reverse proxy for the FastAPI app. Exposes:
+  - `http://localhost` → SPA + API (`/app`, `/api/...` routed to FastAPI).
+
+- **PostgreSQL + pgvector (`pgvector`)**  
+  Primary relational database and vector store for embeddings.
+
+- **Postgres Exporter (`postgres-exporter`)**  
+  Exposes Postgres metrics for Prometheus-compatible setups (not bundled here by default).
+
+- **Elasticsearch (`elasticsearch`)**  
+  Search backend for lexical/BM25 retrieval (Arabic/English) used alongside pgvector.
+
+- **Ollama (`ollama`)**  
+  Local LLM engine exposing an OpenAI-compatible API at `http://ollama:11434/v1` inside the Docker network.
+
+- **vLLM (`vllm`)**  
+  Alternative LLM engine exposing an OpenAI-compatible API at `http://vllm:8000/v1`. The model served is controlled via `VLLM_MODEL_NAME` in `docker/env/.env.app`.
 
 ## Setup Instructions
 
-### 1. Set up environment files
+### 1. Configure environment files
 
-Create your environment files from the examples:
+Inside `docker/env`:
+
+- Edit `./env/.env.app` to configure:
+  - Postgres connection (`POSTGRES_*`)
+  - LLM settings:
+    - `GENERATION_BACKEND`, `EMBEDDING_BACKEND`
+    - `OLLAMA_API_URL`, `VLLM_API_URL`
+    - `GENERATION_API_URL`, `EMBEDDING_API_URL`
+    - `GENERATION_MODEL_ID`, `BEST_GENERATION_MODEL_ID`
+    - `EMBEDDING_MODEL_ID`, `EMBEDDING_MODEL_SIZE`
+    - `VLLM_MODEL_NAME` (model served by vLLM)
+  - Elasticsearch settings (`ELASTICSEARCH_URL`, `ELASTICSEARCH_INDEX_PREFIX`)
+
+- Create Postgres env files from examples:
 
 ```bash
-# Create all required .env files from examples
 cd docker/env
-cp .env.example.app .env.app
 cp .env.example.postgres .env.postgres
-cp .env.example.grafana .env.grafana
 cp .env.example.postgres-exporter .env.postgres-exporter
+```
 
-# Setup the Alembic configuration for the FastAPI application
-cd ..
+Set passwords / DB names as needed to match `.env.app`.
+
+### 2. Setup Alembic configuration (migrations)
+
+```bash
 cd docker/minirag
 cp alembic.example.ini alembic.ini
+```
 
-### 2. Start the services
+Adjust connection string if you change Postgres settings.
+
+### 3. Start the services
+
+From the `docker` directory:
 
 ```bash
 cd docker
 docker compose up --build -d
 ```
 
-To start only specific services:
+This will start:
+
+- `pgvector`, `postgres-exporter`
+- `elasticsearch`
+- `ollama`, `vllm`
+- `fastapi`, `nginx`
+
+If you hit startup ordering issues (e.g., DB not ready), you can start core services first:
 
 ```bash
-docker compose up -d fastapi nginx pgvector qdrant
+docker compose up -d pgvector postgres-exporter elasticsearch
+# wait a bit, then:
+docker compose up --build -d fastapi ollama vllm nginx
 ```
 
-If you encounter connection issues, you may want to start the database services first and let them initialize before starting the application:
-
-```bash
-# Start databases first
-docker compose up -d pgvector qdrant postgres-exporter
-# Wait for databases to be healthy
-sleep 30
-# Start the application services
-docker compose up fastapi nginx prometheus grafana node-exporter --build -d
-```
-
-In case deleting all containers and volumes is necessary, you can run:
+To shut everything down and remove volumes:
 
 ```bash
 docker compose down -v --remove-orphans
 ```
 
-### 3. Access the services
+### 4. Access the services
 
-- FastAPI Application: http://localhost:8000
-- FastAPI Documentation: http://localhost:8000/docs
-- Nginx (serving FastAPI): http://localhost
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000
-- Qdrant UI: http://localhost:6333/dashboard
+- Web UI (SPA via Nginx/FastAPI):  
+  `http://localhost/app`
+
+- API (through Nginx → FastAPI):  
+  `http://localhost/api/...` (e.g. `http://localhost/api/v1/nlp/index/answer/{project_id}`)
+
+- FastAPI docs (proxied via Nginx):  
+  `http://localhost/docs`
+
+> Elasticsearch, Ollama, and vLLM are only exposed inside the Docker network and are intended to be accessed via the FastAPI API, not directly from the host.
 
 ## Volume Management
 
@@ -119,36 +153,13 @@ Docker volumes are used to persist data generated by and used by Docker containe
 
 ## Monitoring
 
-### FastAPI Metrics
-
-FastAPI is configured to expose Prometheus metrics at the `/metrics` endpoint. These metrics include:
-
-- Request counts
-- Request latencies
-- Status codes
-
-Prometheus is configured to scrape these metrics automatically.
-
-### Visualizing Metrics in Grafana
-
-1. Log into Grafana at http://localhost:3000 (default credentials: admin/admin_password)
-2. Add Prometheus as a data source (URL: http://prometheus:9090)
-3. Import dashboards for FastAPI, PostgreSQL, and Qdrant
-
-#### Dashboards URLs
-
-https://grafana.com/grafana/dashboards/18739-fastapi-observability/
-
-https://grafana.com/grafana/dashboards/1860-node-exporter-full/
-
-https://grafana.com/grafana/dashboards/23033-qdrant/
-
-https://grafana.com/grafana/dashboards/12485-postgresql-exporter/
-
+- FastAPI exposes Prometheus-compatible metrics at `/metrics`.  
+- `postgres-exporter` exposes Postgres metrics.  
+- Prometheus / Grafana are **not** included in this compose file, but you can add them if you want full dashboards.
 
 ## Development Workflow
 
-The FastAPI application is configured with hot-reloading. Any changes to the code in the `src/` directory will automatically reload the application.
+In the Docker image, FastAPI is run with multiple workers under Uvicorn. For local development outside Docker, you can still use hot‑reloading via `uvicorn` and the `src/.env` configuration.
 
 ## Troubleshooting
 

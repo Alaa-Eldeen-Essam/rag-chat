@@ -21,6 +21,11 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_API_URL: Optional[str] = None
+    # Role-specific / engine-specific OpenAI-style endpoints
+    GENERATION_API_URL: Optional[str] = None
+    EMBEDDING_API_URL: Optional[str] = None
+    OLLAMA_API_URL: Optional[str] = None
+    VLLM_API_URL: Optional[str] = None
 
     GENERATION_MODEL_ID: Optional[str] = None
     BEST_GENERATION_MODEL_ID: Optional[str] = None
