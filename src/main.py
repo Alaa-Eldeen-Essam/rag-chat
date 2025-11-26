@@ -41,14 +41,31 @@ async def startup_span():
     vectordb_provider_factory = VectorDBProviderFactory(config=settings, db_client=app.db_client)
     search_provider_factory = SearchProviderFactory(settings)
 
+    # Decide which engine's model IDs to use for generation based on the
+    # configured GENERATION_API_URL.
+    use_ollama_for_gen = (
+        getattr(settings, "GENERATION_API_URL", None)
+        and getattr(settings, "OLLAMA_API_URL", None)
+        and settings.GENERATION_API_URL.strip() == settings.OLLAMA_API_URL.strip()
+    )
+
+    if use_ollama_for_gen:
+        base_generation_model_id = settings.OLLAMA_GENERATION_MODEL_ID
+        best_generation_model_id = settings.OLLAMA_BEST_GENERATION_MODEL_ID or base_generation_model_id
+        thinking_generation_model_id = settings.OLLAMA_THINKING_GENERATION_MODEL_ID
+        fast_generation_model_id = settings.OLLAMA_FAST_GENERATION_MODEL_ID
+    else:
+        base_generation_model_id = settings.VLLM_GENERATION_MODEL_ID
+        best_generation_model_id = settings.VLLM_BEST_GENERATION_MODEL_ID or base_generation_model_id
+        thinking_generation_model_id = settings.VLLM_THINKING_GENERATION_MODEL_ID
+        fast_generation_model_id = settings.VLLM_FAST_GENERATION_MODEL_ID
+
     generation_models = {
-        "best": settings.BEST_GENERATION_MODEL_ID or settings.GENERATION_MODEL_ID,
-        "thinking": settings.THINKING_GENERATION_MODEL_ID,
-        "fast": settings.FAST_GENERATION_MODEL_ID,
+        "best": best_generation_model_id,
+        "thinking": thinking_generation_model_id,
+        "fast": fast_generation_model_id,
     }
-    generation_models = {
-        key: value for key, value in generation_models.items() if value
-    }
+    generation_models = {key: value for key, value in generation_models.items() if value}
 
     if not generation_models:
         raise ValueError("No generation models configured. Please update environment variables.")
@@ -70,8 +87,22 @@ async def startup_span():
 
     # embedding client
     app.embedding_client = llm_provider_factory.create_embedding_client()
-    app.embedding_client.set_embedding_model(model_id=settings.EMBEDDING_MODEL_ID,
-                                             embedding_size=settings.EMBEDDING_MODEL_SIZE)
+    # Decide which engine's embedding model ID to use based on the configured EMBEDDING_API_URL.
+    use_ollama_for_embed = (
+        getattr(settings, "EMBEDDING_API_URL", None)
+        and getattr(settings, "OLLAMA_API_URL", None)
+        and settings.EMBEDDING_API_URL.strip() == settings.OLLAMA_API_URL.strip()
+    )
+
+    if use_ollama_for_embed:
+        embedding_model_id = settings.OLLAMA_EMBEDDING_MODEL_ID
+    else:
+        embedding_model_id = settings.VLLM_EMBEDDING_MODEL_ID
+
+    app.embedding_client.set_embedding_model(
+        model_id=embedding_model_id,
+        embedding_size=settings.EMBEDDING_MODEL_SIZE,
+    )
     
     # vector db client
     app.vectordb_client = vectordb_provider_factory.create(

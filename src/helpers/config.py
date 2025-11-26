@@ -39,6 +39,20 @@ class Settings(BaseSettings):
     GENERATION_DAFAULT_TEMPERATURE: Optional[float] = None
     SUMMARY_DEFAULT_MAX_TOKENS: Optional[int] = None
 
+    # Engine-specific model IDs (Ollama)
+    OLLAMA_GENERATION_MODEL_ID: Optional[str] = None
+    OLLAMA_BEST_GENERATION_MODEL_ID: Optional[str] = None
+    OLLAMA_THINKING_GENERATION_MODEL_ID: Optional[str] = None
+    OLLAMA_FAST_GENERATION_MODEL_ID: Optional[str] = None
+    OLLAMA_EMBEDDING_MODEL_ID: Optional[str] = None
+
+    # Engine-specific model IDs (vLLM)
+    VLLM_GENERATION_MODEL_ID: Optional[str] = None
+    VLLM_BEST_GENERATION_MODEL_ID: Optional[str] = None
+    VLLM_THINKING_GENERATION_MODEL_ID: Optional[str] = None
+    VLLM_FAST_GENERATION_MODEL_ID: Optional[str] = None
+    VLLM_EMBEDDING_MODEL_ID: Optional[str] = None
+
     VECTOR_DB_BACKEND_LITERAL: Optional[List[str]] = None
     VECTOR_DB_BACKEND: str
     VECTOR_DB_DISTANCE_METHOD: Optional[str] = None

@@ -30,6 +30,9 @@ RUN apt-get update && apt-get install -y \
     libxslt1-dev \
     libffi-dev \
     curl \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-ara \
     && rm -rf /var/lib/apt/lists/*
 
 COPY src/requirements.txt .

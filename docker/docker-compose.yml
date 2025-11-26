@@ -4,6 +4,7 @@ services:
     build:
       context: ..
       dockerfile: docker/minirag/Dockerfile
+    image: minirag-fastapi:latest
     container_name: fastapi
     volumes:
       - fastapi_data:/app/assets
@@ -31,17 +32,37 @@ services:
     restart: always
     gpus: all
 
-  # vLLM Service (alternative LLM backend with OpenAI-compatible API)
-  vllm:
+  # vLLM Service for chat (OpenAI-compatible API)
+  vllm_chat:
     image: vllm/vllm-openai:latest
-    container_name: vllm
+    container_name: vllm_chat
     command: >
       python -m vllm.entrypoints.openai.api_server
       --host 0.0.0.0
       --port 8000
-      --model ${VLLM_MODEL_NAME}
+      --model ${VLLM_CHAT_MODEL_NAME}
     ports:
       - "8000:8000"
+    env_file:
+      - ./env/.env.app
+    networks:
+      - backend
+    restart: always
+    gpus: all
+
+  # vLLM Service for embeddings (OpenAI-compatible API)
+  vllm_embed:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_embed
+    command: >
+      python -m vllm.entrypoints.openai.api_server
+      --host 0.0.0.0
+      --port 8000
+      --model ${VLLM_EMBED_MODEL_NAME}
+    ports:
+      - "8001:8000"
+    env_file:
+      - ./env/.env.app
     networks:
       - backend
     restart: always
