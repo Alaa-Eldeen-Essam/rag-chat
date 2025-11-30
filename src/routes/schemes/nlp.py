@@ -26,4 +26,5 @@ class SummarizeRequest(BaseModel):
 
 
 class ConversationUpdateRequest(BaseModel):
-    title: str
+    title: Optional[str] = None
+    is_pinned: Optional[bool] = None

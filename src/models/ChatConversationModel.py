@@ -24,6 +24,7 @@ class ChatConversationModel(BaseDataModel):
                 conversation = ChatConversation(
                     conversation_user_id=user_id,
                     conversation_title=title,
+                    conversation_is_pinned=False,
                 )
                 session.add(conversation)
             await session.commit()
@@ -46,6 +47,7 @@ class ChatConversationModel(BaseDataModel):
                 select(ChatConversation)
                 .where(ChatConversation.conversation_user_id == user_id)
                 .order_by(
+                    ChatConversation.conversation_is_pinned.desc(),
                     ChatConversation.updated_at.desc(),
                     ChatConversation.created_at.desc()
                 )
@@ -62,6 +64,26 @@ class ChatConversationModel(BaseDataModel):
                         ChatConversation.conversation_user_id == user_id,
                     )
                     .values(conversation_title=title)
+                )
+            await session.commit()
+
+    async def update_conversation_fields(self, conversation_id: int, user_id: int, *, title: str | None = None, is_pinned: bool | None = None):
+        updates = {}
+        if title is not None:
+            updates["conversation_title"] = title
+        if is_pinned is not None:
+            updates["conversation_is_pinned"] = is_pinned
+        if not updates:
+            return
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    update(ChatConversation)
+                    .where(
+                        ChatConversation.conversation_id == conversation_id,
+                        ChatConversation.conversation_user_id == user_id,
+                    )
+                    .values(**updates)
                 )
             await session.commit()
 

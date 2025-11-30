@@ -296,6 +296,7 @@ async def list_conversations(
         {
             "conversation_id": conversation.conversation_id,
             "title": conversation.conversation_title,
+            "is_pinned": conversation.conversation_is_pinned,
             "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
             "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
         }
@@ -404,6 +405,7 @@ async def get_conversation_history(
             "conversation": {
                 "conversation_id": conversation.conversation_id,
                 "title": conversation.conversation_title,
+                "is_pinned": conversation.conversation_is_pinned,
                 "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
                 "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
             },
@@ -435,17 +437,24 @@ async def rename_conversation(
             },
         )
 
-    await conversation_model.update_conversation_title(
+    new_title = None
+    if update.title is not None:
+        trimmed = update.title.strip()
+        new_title = trimmed or "New Conversation"
+
+    await conversation_model.update_conversation_fields(
         conversation_id=conversation_id,
         user_id=current_user.id,
-        title=update.title.strip() or "New Conversation",
+        title=new_title,
+        is_pinned=update.is_pinned,
     )
 
     return JSONResponse(
         content={
             "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
             "conversation_id": conversation_id,
-            "title": update.title,
+            "title": new_title if new_title is not None else conversation.conversation_title,
+            "is_pinned": update.is_pinned if update.is_pinned is not None else conversation.conversation_is_pinned,
         }
     )
 

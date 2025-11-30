@@ -1,8 +1,10 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="allow")
+
     APP_NAME: str
     APP_VERSION: str
 
@@ -75,10 +77,6 @@ class Settings(BaseSettings):
     # Search / Elasticsearch
     ELASTICSEARCH_URL: Optional[str] = None
     ELASTICSEARCH_INDEX_PREFIX: Optional[str] = None
-
-    class Config:
-        env_file = ".env"
-
 
 def get_settings() -> Settings:
     return Settings()

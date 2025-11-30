@@ -1,4 +1,5 @@
 services:
+
   # FastAPI Application
   fastapi:
     build:
@@ -14,12 +15,18 @@ services:
     depends_on:
       pgvector:
         condition: service_healthy
+      ollama:
+        condition: service_started
+      vllm_chat:
+        condition: service_started
+      vllm_embed:
+        condition: service_started
     env_file:
       - ./env/.env.app
     environment:
       - POSTGRES_HOST=pgvector
 
-  # Ollama Service (LLM backend)
+  # Ollama service (LLM backend)
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -32,7 +39,7 @@ services:
     restart: always
     gpus: all
 
-  # vLLM Service for chat (OpenAI-compatible API)
+  # vLLM Service for chat
   vllm_chat:
     image: vllm/vllm-openai:latest
     container_name: vllm_chat
@@ -43,6 +50,8 @@ services:
       --model ${VLLM_CHAT_MODEL_NAME}
     ports:
       - "8000:8000"
+    volumes:
+      - vllm_chat_data:/root/.cache/huggingface
     env_file:
       - ./env/.env.app
     networks:
@@ -50,7 +59,7 @@ services:
     restart: always
     gpus: all
 
-  # vLLM Service for embeddings (OpenAI-compatible API)
+  # vLLM Service for embeddings
   vllm_embed:
     image: vllm/vllm-openai:latest
     container_name: vllm_embed
@@ -61,6 +70,8 @@ services:
       --model ${VLLM_EMBED_MODEL_NAME}
     ports:
       - "8001:8000"
+    volumes:
+      - vllm_embed_data:/root/.cache/huggingface
     env_file:
       - ./env/.env.app
     networks:
@@ -68,7 +79,7 @@ services:
     restart: always
     gpus: all
 
-  # Nginx Service
+  # Nginx
   nginx:
     image: nginx:stable-alpine3.20-perl
     container_name: nginx
@@ -82,8 +93,7 @@ services:
       - backend
     restart: always
 
-
-  # Elasticsearch (search backend)
+  # Elasticsearch
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
     container_name: elasticsearch
@@ -91,12 +101,15 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
     networks:
       - backend
     restart: always
-
 
   # PostgreSQL (pgvector)
   pgvector:
@@ -105,7 +118,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - 'pgvector:/var/lib/postgresql/data'
+      - pgvector:/var/lib/postgresql/data
     env_file:
       - ./env/.env.postgres
     networks:
@@ -118,7 +131,7 @@ services:
       retries: 5
       start_period: 10s
 
-  # PostgreSQL Exporter for Postgres metrics
+  # Postgres metrics exporter
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.17.1
     container_name: postgres-exporter
@@ -141,3 +154,5 @@ volumes:
   pgvector:
   ollama_data:
   elasticsearch_data:
+  vllm_chat_data:
+  vllm_embed_data:
