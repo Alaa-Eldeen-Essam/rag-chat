@@ -68,7 +68,7 @@ $ sudo docker compose up -d
 From the project root (where `src/main.py` lives):
 
 ```bash
-uvicorn src.main:app --reload --host 0.0.0.0 --port 5000
+uvicorn main:app --reload --host 0.0.0.0 --port 5000
 ```
 
 Make sure your vector database and LLM backend (e.g. Ollama) are running and that the corresponding environment variables (`VECTOR_DB_BACKEND`, `GENERATION_BACKEND`, `OPENAI_API_URL`, `GENERATION_MODEL_ID`, etc.) are set.

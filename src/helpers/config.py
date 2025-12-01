@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_API_URL: Optional[str] = None
+    HF_TOKEN: Optional[str] = None
+    HF_HUB_OFFLINE: Optional[bool] = None
     # Role-specific / engine-specific OpenAI-style endpoints
     GENERATION_API_URL: Optional[str] = None
     EMBEDDING_API_URL: Optional[str] = None
