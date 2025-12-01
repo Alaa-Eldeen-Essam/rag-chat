@@ -23,6 +23,7 @@ class ResponseSignal(Enum):
     RAG_ANSWER_SUCCESS = "rag_answer_success"
     SUMMARY_GENERATION_ERROR = "summary_generation_error"
     SUMMARY_GENERATION_SUCCESS = "summary_generation_success"
+    SUMMARY_DELETE_SUCCESS = "summary_delete_success"
     RAG_ANSWER_STREAM_START = "rag_answer_stream_start"
     RAG_ANSWER_STREAM_DELTA = "rag_answer_stream_delta"
     SUMMARY_STREAM_START = "summary_stream_start"

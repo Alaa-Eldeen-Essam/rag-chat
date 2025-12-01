@@ -1,6 +1,6 @@
 from fastapi import APIRouter, status, Request, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest, ConversationUpdateRequest
+from routes.schemes.nlp import PushRequest, SearchRequest, SummarizeRequest, ConversationUpdateRequest, DeleteSummariesRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
 from models.SummaryModel import SummaryModel
@@ -1160,6 +1160,7 @@ async def answer_rag(
 
     if search_request.stream:
         async def event_stream():
+            # Fallback path: no answer could be produced from the documents
             if no_answer_from_docs:
                 yield json.dumps({
                     "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
@@ -1171,7 +1172,7 @@ async def answer_rag(
 
                 yield json.dumps({
                     "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
-                    "delta": fallback_answer
+                    "delta": fallback_answer,
                 }) + "\n"
 
                 response_time_ms = int((time.perf_counter() - start_time) * 1000)
@@ -1187,6 +1188,11 @@ async def answer_rag(
                     retrieved_chunks=retrieved_chunks_count,
                     retrieved_doc_types=retrieved_doc_types or None,
                     retrieved_asset_ids=retrieved_asset_ids or None,
+                    retrieved_asset_names=[
+                        asset_label_lookup.get(aid)
+                        for aid in (retrieved_asset_ids or [])
+                        if asset_label_lookup.get(aid)
+                    ] or None,
                     resources=[],
                 )
                 await conversation_model.touch_conversation(conversation.conversation_id)
@@ -1206,83 +1212,89 @@ async def answer_rag(
                     "sources": [],
                 }
                 yield json.dumps(payload) + "\n"
-            else:
-                try:
-                    yield json.dumps({
-                        "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
-                        "conversation_id": conversation.conversation_id,
-                        "conversation_title": conversation.conversation_title,
-                        "model": model_key_used,
-                        "model_id": generation_models.get(model_key_used),
-                    }) + "\n"
+                return
 
-                    for chunk in answer_result:
-                        if chunk:
-                            yield json.dumps({
-                                "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
-                                "delta": chunk
-                            }) + "\n"
-                finally:
-                    final_answer = compose_final_answer(collector)
+            try:
+                yield json.dumps({
+                    "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
+                    "conversation_id": conversation.conversation_id,
+                    "conversation_title": conversation.conversation_title,
+                    "model": model_key_used,
+                    "model_id": generation_models.get(model_key_used),
+                }) + "\n"
 
-                    # If we extracted a direct hint for a "why / لماذا" question
-                    # but the model still produced a refusal-style answer, prefer
-                    # a deterministic answer built directly from the hint instead.
-                    if direct_hint and question_type == "why" and looks_like_refusal(final_answer):
-                        has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
-                        hint_for_display = clean_display_hint(direct_hint)
-                        if doc_label_for_hint:
-                            prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
-                            prefix_en = f'According to the document "{doc_label_for_hint}", '
-                        else:
-                            prefix_ar = "وفقاً للمستندات، "
-                            prefix_en = "According to the documents, "
-                        if has_arabic:
-                            final_answer = (
-                                f"{prefix_ar}تذكر المستندات المعلومة التالية جواباً عن سؤالك: "
-                                f"{hint_for_display}"
-                            )
-                        else:
-                            final_answer = (
-                                f"{prefix_en}the documents provide the following information as the "
-                                f"answer to your question: {hint_for_display}"
-                            )
-                    signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
+                for chunk in answer_result:
+                    if chunk:
+                        yield json.dumps({
+                            "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
+                            "delta": chunk,
+                        }) + "\n"
+            finally:
+                final_answer = compose_final_answer(collector)
 
-                    history_record = None
-                    if final_answer:
-                        response_time_ms = int((time.perf_counter() - start_time) * 1000)
-                        history_record = await chat_history_model.create_history(
-                            user_id=current_user.id,
-                            conversation_id=conversation.conversation_id,
-                            prompt=search_request.text,
-                            answer=final_answer,
-                            model_key=model_key_used,
-                            doc_types=history_filter or ["all"],
-                            response_time_ms=response_time_ms,
-                            fallback_used=False,
-                            retrieved_chunks=retrieved_chunks_count,
-                            retrieved_doc_types=retrieved_doc_types or None,
-                            retrieved_asset_ids=retrieved_asset_ids or None,
-                            resources=answer_sources or None,
+                # If we extracted a direct hint for a "why / لماذا" question
+                # but the model still produced a refusal-style answer, prefer
+                # a deterministic answer built directly from the hint instead.
+                if direct_hint and question_type == "why" and looks_like_refusal(final_answer):
+                    has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
+                    hint_for_display = clean_display_hint(direct_hint)
+                    if doc_label_for_hint:
+                        prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
+                        prefix_en = f'According to the document "{doc_label_for_hint}", '
+                    else:
+                        prefix_ar = "وفقاً للمستندات، "
+                        prefix_en = "According to the documents, "
+                    if has_arabic:
+                        final_answer = (
+                            f"{prefix_ar}تذكر المستندات المعلومة التالية جواباً عن سؤالك: "
+                            f"{hint_for_display}"
                         )
-                        await conversation_model.touch_conversation(conversation.conversation_id)
+                    else:
+                        final_answer = (
+                            f"{prefix_en}the documents provide the following information as the "
+                            f"answer to your question: {hint_for_display}"
+                        )
+                signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
 
-                    payload = {
-                        "signal": signal_value,
-                        "answer": final_answer,
-                        "full_prompt": full_prompt,
-                        "chat_history": chat_history,
-                        "conversation_id": conversation.conversation_id,
-                        "conversation_title": conversation.conversation_title,
-                        "document_types": history_filter or ["all"],
-                        "model": model_key_used,
-                        "model_id": generation_models.get(model_key_used),
-                        "asset_id": asset_filter,
-                        "message_id": history_record.id if history_record else None,
-                        "sources": answer_sources,
-                    }
-                    yield json.dumps(payload) + "\n"
+                history_record = None
+                if final_answer:
+                    response_time_ms = int((time.perf_counter() - start_time) * 1000)
+                    history_record = await chat_history_model.create_history(
+                        user_id=current_user.id,
+                        conversation_id=conversation.conversation_id,
+                        prompt=search_request.text,
+                        answer=final_answer,
+                        model_key=model_key_used,
+                        doc_types=history_filter or ["all"],
+                        response_time_ms=response_time_ms,
+                        fallback_used=False,
+                        retrieved_chunks=retrieved_chunks_count,
+                        retrieved_doc_types=retrieved_doc_types or None,
+                        retrieved_asset_ids=retrieved_asset_ids or None,
+                        retrieved_asset_names=[
+                            asset_label_lookup.get(aid)
+                            for aid in (retrieved_asset_ids or [])
+                            if asset_label_lookup.get(aid)
+                        ] or None,
+                        resources=answer_sources or None,
+                    )
+                    await conversation_model.touch_conversation(conversation.conversation_id)
+
+                payload = {
+                    "signal": signal_value,
+                    "answer": final_answer,
+                    "full_prompt": full_prompt,
+                    "chat_history": chat_history,
+                    "conversation_id": conversation.conversation_id,
+                    "conversation_title": conversation.conversation_title,
+                    "document_types": history_filter or ["all"],
+                    "model": model_key_used,
+                    "model_id": generation_models.get(model_key_used),
+                    "asset_id": asset_filter,
+                    "message_id": history_record.id if history_record else None,
+                    "sources": answer_sources,
+                }
+                yield json.dumps(payload) + "\n"
 
         return StreamingResponse(event_stream(), media_type="application/json")
 
@@ -1300,6 +1312,11 @@ async def answer_rag(
             retrieved_chunks=retrieved_chunks_count,
             retrieved_doc_types=retrieved_doc_types or None,
             retrieved_asset_ids=retrieved_asset_ids or None,
+            retrieved_asset_names=[
+                asset_label_lookup.get(aid)
+                for aid in (retrieved_asset_ids or [])
+                if asset_label_lookup.get(aid)
+            ] or None,
             resources=[],
         )
         await conversation_model.touch_conversation(conversation.conversation_id)
@@ -1390,6 +1407,11 @@ async def answer_rag(
         retrieved_chunks=retrieved_chunks_count,
         retrieved_doc_types=retrieved_doc_types or None,
         retrieved_asset_ids=retrieved_asset_ids or None,
+        retrieved_asset_names=[
+            asset_label_lookup.get(aid)
+            for aid in (retrieved_asset_ids or [])
+            if asset_label_lookup.get(aid)
+        ] or None,
         resources=answer_sources or None,
     )
     await conversation_model.touch_conversation(conversation.conversation_id)
@@ -1933,5 +1955,96 @@ async def get_summary(
             if summary_record.created_at
             else None,
             "prompt_text": summary_record.prompt_text,
+            "max_output_tokens_used": summary_record.max_output_tokens,
+        }
+    )
+
+
+@nlp_router.delete("/summary/{summary_id}")
+async def delete_summary(
+    request: Request,
+    summary_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+    summary_record = await summary_model.get_summary_by_id(summary_id)
+
+    if not summary_record:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                "detail": f"Summary with id {summary_id} not found.",
+            },
+        )
+
+    if summary_record.user_id != getattr(current_user, "id", None) and not getattr(
+        current_user, "is_admin", False
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "You do not have access to delete this summary.",
+            },
+        )
+
+    deleted = await summary_model.delete_summary(summary_id=summary_id)
+    if not deleted:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                "detail": f"Summary with id {summary_id} not found.",
+            },
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.SUMMARY_DELETE_SUCCESS.value,
+            "summary_id": summary_id,
+        }
+    )
+
+
+@nlp_router.post("/summaries/bulk-delete")
+async def delete_summaries_bulk(
+    request: Request,
+    payload: DeleteSummariesRequest,
+    current_user: User = Depends(get_current_user),
+):
+    summary_ids = payload.summary_ids or []
+    if not summary_ids:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                "detail": "No summary ids provided.",
+            },
+        )
+
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    deleted_ids = []
+    for summary_id in summary_ids:
+        summary_record = await summary_model.get_summary_by_id(summary_id)
+        if not summary_record:
+            continue
+        if summary_record.user_id != getattr(current_user, "id", None) and not getattr(
+            current_user, "is_admin", False
+        ):
+            continue
+        deleted = await summary_model.delete_summary(summary_id=summary_id)
+        if deleted:
+            deleted_ids.append(summary_id)
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.SUMMARY_DELETE_SUCCESS.value,
+            "deleted_ids": deleted_ids,
         }
     )

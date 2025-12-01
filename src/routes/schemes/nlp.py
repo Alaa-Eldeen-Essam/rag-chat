@@ -28,3 +28,7 @@ class SummarizeRequest(BaseModel):
 class ConversationUpdateRequest(BaseModel):
     title: Optional[str] = None
     is_pinned: Optional[bool] = None
+
+
+class DeleteSummariesRequest(BaseModel):
+    summary_ids: List[int]

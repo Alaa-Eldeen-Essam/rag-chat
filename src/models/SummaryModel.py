@@ -1,6 +1,7 @@
 from .BaseDataModel import BaseDataModel
 from .db_schemes import SummaryRecord
 from sqlalchemy.future import select
+from sqlalchemy import delete
 from typing import Optional, List
 
 
@@ -55,3 +56,33 @@ class SummaryModel(BaseDataModel):
                 .limit(limit)
             )
             return result.scalars().all()
+
+    async def get_summary_by_id(self, summary_id: int) -> Optional[SummaryRecord]:
+        async with self.db_client() as session:
+            result = await session.execute(
+                select(SummaryRecord).where(SummaryRecord.summary_id == summary_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def delete_summary(self, summary_id: int) -> bool:
+        async with self.db_client() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(SummaryRecord).where(SummaryRecord.summary_id == summary_id)
+                )
+                record = result.scalar_one_or_none()
+                if not record:
+                    return False
+                await session.delete(record)
+            await session.commit()
+        return True
+
+    async def delete_summaries_by_asset_id(self, asset_id: int) -> int:
+        async with self.db_client() as session:
+            async with session.begin():
+                result = await session.execute(
+                    delete(SummaryRecord).where(SummaryRecord.asset_id == asset_id).returning(SummaryRecord.summary_id)
+                )
+            await session.commit()
+            deleted_rows = result.fetchall() if result else []
+        return len(deleted_rows)

@@ -24,6 +24,7 @@ class ChatHistory(SQLAlchemyBase):
     retrieved_chunks = Column(Integer, nullable=True)
     retrieved_doc_types = Column(JSONB, nullable=True)
     retrieved_asset_ids = Column(JSONB, nullable=True)
+    retrieved_asset_names = Column(JSONB, nullable=True)
 
     # Persisted list of resources (RAG evidence) associated with this
     # exchange so that the frontend can re-display them when loading
