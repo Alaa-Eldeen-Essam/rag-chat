@@ -70,24 +70,22 @@ class UserModel(BaseDataModel):
         constraint error if another worker raced to create it.
         """
         async with self.db_client() as session:
-            async with session.begin():
-                result = await session.execute(
-                    select(User).where(User.username == username)
-                )
-                existing = result.scalar_one_or_none()
-                if existing:
-                    return existing
-
-                user = User(
-                    username=username,
-                    password_hash=password_hash,
-                    is_admin=True,
-                    department="Global",
-                )
-                session.add(user)
-
             try:
-                await session.commit()
+                async with session.begin():
+                    result = await session.execute(
+                        select(User).where(User.username == username)
+                    )
+                    existing = result.scalar_one_or_none()
+                    if existing:
+                        return existing
+
+                    user = User(
+                        username=username,
+                        password_hash=password_hash,
+                        is_admin=True,
+                        department="Global",
+                    )
+                    session.add(user)
             except IntegrityError:
                 # Another worker likely created this admin concurrently.
                 await session.rollback()

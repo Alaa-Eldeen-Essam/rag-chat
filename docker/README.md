@@ -20,8 +20,14 @@ This directory contains the Docker setup for the MiniRAG application, including 
 - **Elasticsearch (`elasticsearch`)**  
   Search backend for lexical/BM25 retrieval (Arabic/English) used alongside pgvector.
 
-- **Ollama (`ollama`)**  
-  Local LLM engine exposing an OpenAI-compatible API at `http://ollama:11434/v1` inside the Docker network.
+- **Ollama Chat (`ollama_chat`)**  
+  Handles interactive generation models and exposes an OpenAI-compatible API at `http://ollama_chat:11434/v1` (published on host `:11434`).
+
+- **Ollama Embed (`ollama_embed`)**  
+  Dedicated Ollama instance for embedding models, reachable at `http://ollama_embed:11434/v1` (internal only, host port `11436` if you need to access it directly).
+
+- **Ollama Reranker (`ollama_reranker`)**  
+  Dedicated Ollama instance that serves the cross-encoder reranker model (`qllama/bge-reranker-v2-m3:q8_0`) at `http://ollama_reranker:11434/v1`. FastAPI uses it only when `RERANKER_ENABLED=true` in `.env.app`.
 
 - **vLLM (`vllm`)**  
   Alternative LLM engine exposing an OpenAI-compatible API at `http://vllm:8000/v1`. The model served is controlled via `VLLM_MODEL_NAME` in `docker/env/.env.app`.
@@ -103,7 +109,7 @@ docker compose down -v --remove-orphans
 - FastAPI docs (proxied via Nginx):  
   `http://localhost/docs`
 
-> Elasticsearch, Ollama, and vLLM are only exposed inside the Docker network and are intended to be accessed via the FastAPI API, not directly from the host.
+> Elasticsearch, Ollama Embed, and vLLM are only exposed inside the Docker network and are intended to be accessed via the FastAPI API, not directly from the host. Ollama Chat is mapped to `localhost:11434` for convenience; reranker is on `localhost:11435`.
 
 ## Volume Management
 

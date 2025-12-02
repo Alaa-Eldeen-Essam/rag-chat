@@ -44,7 +44,7 @@ class PGVectorProvider(VectorDBInterface):
 
                 if not extension_exists:
                     # Only create if it doesn't exist
-                    await session.execute(sql_text("CREATE EXTENSION vector"))
+                    await session.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
                     await session.commit()
             except Exception as e:
                 # If extension already exists or any other error, just log and continue

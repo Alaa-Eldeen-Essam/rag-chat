@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from .BaseController import BaseController
@@ -51,6 +52,8 @@ class NLPController(BaseController):
         embedding_client,
         template_parser,
         search_client=None,
+        reranker_client=None,
+        reranker_max_candidates: Optional[int] = None,
     ):
         super().__init__()
 
@@ -59,6 +62,8 @@ class NLPController(BaseController):
         self.embedding_client = embedding_client
         self.template_parser = template_parser
         self.search_client = search_client
+        self.reranker_client = reranker_client
+        self.reranker_max_candidates = reranker_max_candidates or 0
 
     def create_collection_name(self, project_id: str):
         return f"collection_{self.vectordb_client.default_vector_size}_{project_id}".strip()
@@ -532,6 +537,71 @@ class NLPController(BaseController):
                     results = filtered_results
 
         return results
+
+    async def rerank_documents(self, query: str, documents: List[Any]) -> List[Any]:
+        """
+        Optionally rerank the retrieved documents using an external cross-encoder.
+        """
+        if (
+            not query
+            or not documents
+            or not self.reranker_client
+            or self.reranker_max_candidates <= 0
+        ):
+            return documents
+
+        limit = min(self.reranker_max_candidates, len(documents))
+        candidate_texts: List[str] = []
+        for doc in documents[:limit]:
+            text_value = getattr(doc, "text", "") or ""
+            candidate_texts.append(text_value.strip())
+
+        if not any(candidate_texts):
+            return documents
+
+        start_time = time.perf_counter()
+        try:
+            rerank_scores = await self.reranker_client.rerank(
+                query=query,
+                documents=candidate_texts,
+                top_n=limit,
+            )
+        except Exception as exc:
+            logger.error("Reranker call failed: %s", exc)
+            return documents
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.debug(
+            "Reranked %s candidates in %d ms", len(candidate_texts), duration_ms
+        )
+
+        if not rerank_scores:
+            return documents
+
+        score_lookup: Dict[int, float] = {}
+        for entry in rerank_scores:
+            idx = entry.get("index")
+            if idx is None:
+                continue
+            try:
+                idx_int = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx_int < limit:
+                score_lookup[idx_int] = float(entry.get("score") or 0.0)
+
+        if not score_lookup:
+            return documents
+
+        ranked_slice = sorted(
+            range(limit),
+            key=lambda idx: score_lookup.get(idx, float("-inf")),
+            reverse=True,
+        )
+        reordered = [documents[idx] for idx in ranked_slice]
+        if limit < len(documents):
+            reordered.extend(documents[limit:])
+        return reordered
 
     def _try_extract_direct_answer(self, query: str, documents: List[Any], question_type: str) -> Optional[str]:
         """

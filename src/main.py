@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from routes import auth, base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
+from stores.llm.providers.RerankerProvider import RerankerProvider
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
 from stores.search import SearchProviderFactory
@@ -43,10 +44,14 @@ async def startup_span():
 
     # Decide which engine's model IDs to use for generation based on the
     # configured GENERATION_API_URL.
+    ollama_chat_url = (
+        getattr(settings, "OLLAMA_CHAT_API_URL", None)
+        or getattr(settings, "OLLAMA_API_URL", None)
+    )
     use_ollama_for_gen = (
         getattr(settings, "GENERATION_API_URL", None)
-        and getattr(settings, "OLLAMA_API_URL", None)
-        and settings.GENERATION_API_URL.strip() == settings.OLLAMA_API_URL.strip()
+        and ollama_chat_url
+        and settings.GENERATION_API_URL.strip() == ollama_chat_url.strip()
     )
 
     if use_ollama_for_gen:
@@ -88,10 +93,14 @@ async def startup_span():
     # embedding client
     app.embedding_client = llm_provider_factory.create_embedding_client()
     # Decide which engine's embedding model ID to use based on the configured EMBEDDING_API_URL.
+    ollama_embed_url = (
+        getattr(settings, "OLLAMA_EMBED_API_URL", None)
+        or getattr(settings, "OLLAMA_API_URL", None)
+    )
     use_ollama_for_embed = (
         getattr(settings, "EMBEDDING_API_URL", None)
-        and getattr(settings, "OLLAMA_API_URL", None)
-        and settings.EMBEDDING_API_URL.strip() == settings.OLLAMA_API_URL.strip()
+        and ollama_embed_url
+        and settings.EMBEDDING_API_URL.strip() == ollama_embed_url.strip()
     )
 
     if use_ollama_for_embed:
@@ -119,6 +128,23 @@ async def startup_span():
         language=settings.PRIMARY_LANG,
         default_language=settings.DEFAULT_LANG,
     )
+
+    app.reranker_client = None
+    app.reranker_max_candidates = settings.RERANKER_MAX_CANDIDATES or 0
+    reranker_api_url = settings.RERANKER_API_URL
+    if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
+        reranker_api_url = f"{settings.OLLAMA_RERANKER_API_URL.rstrip('/')}/rerank"
+
+    if (
+        getattr(settings, "RERANKER_ENABLED", False)
+        and reranker_api_url
+        and settings.RERANKER_MODEL_ID
+    ):
+        app.reranker_client = RerankerProvider(
+            api_url=reranker_api_url,
+            api_key=settings.RERANKER_API_KEY,
+            model_id=settings.RERANKER_MODEL_ID,
+        )
 
     user_model = await UserModel.create_instance(
         db_client=app.db_client

@@ -159,6 +159,8 @@ async def index_project(
         embedding_client=request.app.embedding_client,
         template_parser=template_parser,
         search_client=getattr(request.app, "search_client", None),
+        reranker_client=getattr(request.app, "reranker_client", None),
+        reranker_max_candidates=getattr(request.app, "reranker_max_candidates", 0),
     )
 
     has_records = True
@@ -270,6 +272,8 @@ async def get_project_index_info(
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
         search_client=getattr(request.app, "search_client", None),
+        reranker_client=getattr(request.app, "reranker_client", None),
+        reranker_max_candidates=getattr(request.app, "reranker_max_candidates", 0),
     )
 
     collection_info =await nlp_controller.get_vector_db_collection_info(project=project)
@@ -578,6 +582,8 @@ async def search_index(
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
         search_client=getattr(request.app, "search_client", None),
+        reranker_client=getattr(request.app, "reranker_client", None),
+        reranker_max_candidates=getattr(request.app, "reranker_max_candidates", 0),
     )
 
     results = await nlp_controller.search_vector_db_collection(
@@ -587,6 +593,12 @@ async def search_index(
         asset_ids=asset_ids_for_search,
         keywords=keywords or None,
     )
+
+    if results:
+        results = await nlp_controller.rerank_documents(
+            query=search_request.text or "",
+            documents=results,
+        )
 
     if not results:
         return JSONResponse(
@@ -689,6 +701,8 @@ async def answer_rag(
         embedding_client=request.app.embedding_client,
         template_parser=template_parser,
         search_client=getattr(request.app, "search_client", None),
+        reranker_client=getattr(request.app, "reranker_client", None),
+        reranker_max_candidates=getattr(request.app, "reranker_max_candidates", 0),
     )
 
     chat_history_model = await ChatHistoryModel.create_instance(
@@ -915,6 +929,12 @@ async def answer_rag(
             )
             if results:
                 retrieved_documents.extend(results)
+
+    if retrieved_documents:
+        retrieved_documents = await nlp_controller.rerank_documents(
+            query=search_request.text or "",
+            documents=retrieved_documents,
+        )
 
     # Attempt deterministic direct extraction (e.g. dates / reasons) before
     # delegating to the LLM, so simple factual questions behave consistently.

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     GENERATION_API_URL: Optional[str] = None
     EMBEDDING_API_URL: Optional[str] = None
     OLLAMA_API_URL: Optional[str] = None
+    OLLAMA_CHAT_API_URL: Optional[str] = None
+    OLLAMA_EMBED_API_URL: Optional[str] = None
+    OLLAMA_RERANKER_API_URL: Optional[str] = None
     VLLM_API_URL: Optional[str] = None
 
     GENERATION_MODEL_ID: Optional[str] = None
@@ -79,6 +82,13 @@ class Settings(BaseSettings):
     # Search / Elasticsearch
     ELASTICSEARCH_URL: Optional[str] = None
     ELASTICSEARCH_INDEX_PREFIX: Optional[str] = None
+
+    # Reranker
+    RERANKER_ENABLED: bool = False
+    RERANKER_API_URL: Optional[str] = None
+    RERANKER_API_KEY: Optional[str] = None
+    RERANKER_MODEL_ID: Optional[str] = None
+    RERANKER_MAX_CANDIDATES: int = 50
 
 def get_settings() -> Settings:
     return Settings()
