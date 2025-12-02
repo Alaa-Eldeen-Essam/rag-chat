@@ -86,14 +86,26 @@ class OpenAIProvider(LLMInterface):
             for part in content:
                 part_type = getattr(part, "type", None)
                 part_text = getattr(part, "text", None)
+                part_content = getattr(part, "content", None)
+
+                if isinstance(part, dict):
+                    part_type = part.get("type", part_type)
+                    if part_text is None:
+                        part_text = part.get("text")
+                    if part_content is None:
+                        part_content = part.get("content")
 
                 if part_text:
                     target = answer_parts
-                    if part_type and part_type.lower() in ("reasoning", "analysis", "thought"):
+                    if part_type and isinstance(part_type, str) and part_type.lower() in ("reasoning", "analysis", "thought"):
                         target = reasoning_parts
                     target.append(part_text.strip())
-                elif hasattr(part, "content") and isinstance(part.content, str):
-                    answer_parts.append(part.content.strip())
+                elif isinstance(part_content, str):
+                    answer_parts.append(part_content.strip())
+                elif isinstance(part_content, list):
+                    for text_piece in self._extract_text_parts(part_content):
+                        if text_piece.strip():
+                            answer_parts.append(text_piece.strip())
 
         elif isinstance(content, str) and content.strip():
             answer_parts.append(content.strip())
@@ -157,6 +169,20 @@ class OpenAIProvider(LLMInterface):
                 texts.extend(self._extract_text_parts(item))
             return texts
 
+        if isinstance(value, dict):
+            text_value = value.get("text")
+            if isinstance(text_value, str):
+                texts.append(text_value)
+            elif isinstance(text_value, list):
+                texts.extend(self._extract_text_parts(text_value))
+
+            content_value = value.get("content")
+            if isinstance(content_value, str):
+                texts.append(content_value)
+            elif isinstance(content_value, list):
+                texts.extend(self._extract_text_parts(content_value))
+            return texts
+
         text_attr = getattr(value, "text", None)
         if isinstance(text_attr, str):
             texts.append(text_attr)
@@ -210,11 +236,13 @@ class OpenAIProvider(LLMInterface):
                     if not delta:
                         continue
 
-                    for text_piece in self._extract_text_parts(getattr(delta, "content", None)):
+                    content_value = getattr(delta, "content", None)
+                    for text_piece in self._extract_text_parts(content_value):
                         output_collector.append(text_piece)
                         yield text_piece
 
-                    for reasoning_piece in self._extract_text_parts(getattr(delta, "reasoning", None)):
+                    reasoning_value = getattr(delta, "reasoning", None)
+                    for reasoning_piece in self._extract_text_parts(reasoning_value):
                         reasoning_collector.append(reasoning_piece)
 
                     finish_reason = getattr(choice, "finish_reason", None)
@@ -223,9 +251,11 @@ class OpenAIProvider(LLMInterface):
 
                 if last_choice and getattr(last_choice, "message", None):
                     message_obj = last_choice.message
-                    for text_piece in self._extract_text_parts(getattr(message_obj, "content", None)):
+                    final_content = getattr(message_obj, "content", None)
+                    for text_piece in self._extract_text_parts(final_content):
                         output_collector.append(text_piece)
-                    for reasoning_piece in self._extract_text_parts(getattr(message_obj, "reasoning", None)):
+                    final_reasoning = getattr(message_obj, "reasoning", None)
+                    for reasoning_piece in self._extract_text_parts(final_reasoning):
                         reasoning_collector.append(reasoning_piece)
 
             except Exception as exc:

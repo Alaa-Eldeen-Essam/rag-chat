@@ -17,10 +17,6 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
-      vllm_chat:
-        condition: service_started
-      vllm_embed:
-        condition: service_started
     env_file:
       - ./env/.env.app
     environment:

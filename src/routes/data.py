@@ -899,6 +899,9 @@ async def delete_asset(
         await request.app.vectordb_client.delete_records(collection_name, chunk_ids)
 
     await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
     await summary_model.delete_summaries_by_asset_id(asset_record.asset_id)
 
     # Also delete the underlying file from disk if it exists.

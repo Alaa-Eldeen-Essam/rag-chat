@@ -1,3 +1,5 @@
+import logging
+import os
 from fastapi import APIRouter, Request, status, Depends, Query
 from fastapi.responses import JSONResponse
 from routes.schemes.users import (
@@ -7,17 +9,75 @@ from routes.schemes.users import (
     UserAdminUpdateRequest,
     UserBasicUpdateRequest,
 )
-from controllers import UserController
+from controllers import UserController, NLPController, ProjectController
 from models.UserModel import UserModel
 from models import ResponseSignal
-from models.db_schemes import User
+from models.db_schemes import User, ChatHistory, ChatConversation, SummaryRecord, Asset, Project
 from routes.dependencies import get_current_user
 from sqlalchemy import select, delete, update, func
+from models.AssetModel import AssetModel
+from models.ChunkModel import ChunkModel
+from models.SummaryModel import SummaryModel
+
+logger = logging.getLogger("uvicorn.error")
 
 users_router = APIRouter(
     prefix="/api/v1/users",
     tags=["api_v1", "users"],
 )
+
+
+async def _delete_asset_tree(
+    request: Request,
+    asset_id: int,
+    current_user: User,
+    *,
+    asset_model: AssetModel,
+    chunk_model: ChunkModel,
+    summary_model: SummaryModel,
+    project_controller: ProjectController,
+):
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user,
+    )
+    if not asset_record or not exists_or_forbidden:
+        return
+
+    chunk_ids = await chunk_model.get_chunk_ids_by_asset_ids([asset_record.asset_id])
+    if chunk_ids:
+        vectordb_client = getattr(request.app, "vectordb_client", None)
+        if vectordb_client:
+            nlp_controller = NLPController(
+                vectordb_client=vectordb_client,
+                generation_client=request.app.generation_client,
+                embedding_client=request.app.embedding_client,
+                template_parser=request.app.template_parser,
+                search_client=getattr(request.app, "search_client", None),
+            )
+            collection_name = nlp_controller.create_collection_name(
+                project_id=asset_record.asset_project_id
+            )
+            await vectordb_client.delete_records(collection_name, chunk_ids)
+
+    await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+    await summary_model.delete_summaries_by_asset_id(asset_record.asset_id)
+
+    try:
+        project_path = project_controller.get_project_path(
+            project_id=asset_record.asset_project_id
+        )
+        file_path = os.path.join(project_path, asset_record.asset_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as exc:
+        logger.error(
+            "Failed to delete file for asset %s: %s",
+            asset_record.asset_id,
+            exc,
+        )
+
+    await asset_model.delete_asset(asset_record)
 
 
 @users_router.get("/me")
@@ -432,20 +492,61 @@ async def delete_user(
             },
         )
 
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+    chunk_model = await ChunkModel.create_instance(
+        db_client=request.app.db_client
+    )
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+    project_controller = ProjectController()
+
+    # Ensure the user exists and capture their assets before we mutate anything.
+    async with request.app.db_client() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user_record = result.scalar_one_or_none()
+        if user_record is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                    "detail": f"User with id {user_id} not found.",
+                },
+            )
+        asset_result = await session.execute(
+            select(Asset.asset_id).where(Asset.asset_user_id == user_id)
+        )
+        asset_ids = asset_result.scalars().all()
+
+    for asset_id in asset_ids:
+        await _delete_asset_tree(
+            request,
+            asset_id,
+            current_user,
+            asset_model=asset_model,
+            chunk_model=chunk_model,
+            summary_model=summary_model,
+            project_controller=project_controller,
+        )
+
     async with request.app.db_client() as session:
         async with session.begin():
-            result = await session.execute(
-                select(User).where(User.id == user_id)
+            await session.execute(
+                delete(ChatHistory).where(ChatHistory.user_id == user_id)
             )
-            user_record = result.scalar_one_or_none()
-            if user_record is None:
-                return JSONResponse(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    content={
-                        "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
-                        "detail": f"User with id {user_id} not found.",
-                    },
+            await session.execute(
+                delete(ChatConversation).where(
+                    ChatConversation.conversation_user_id == user_id
                 )
+            )
+            await session.execute(
+                delete(SummaryRecord).where(SummaryRecord.user_id == user_id)
+            )
+            await session.execute(
+                delete(Project).where(Project.project_user_id == user_id)
+            )
             await session.execute(
                 delete(User).where(User.id == user_id)
             )
