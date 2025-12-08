@@ -623,27 +623,9 @@ async def answer_rag(
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
-    
-    project_model = await ProjectModel.create_instance(
-        db_client=request.app.db_client
-    )
 
-    project, status_code = await project_model.get_project_or_create_one(
-        project_id=project_id,
-        current_user=current_user,
-        create_if_missing=False,
-        is_private=None,
-    )
-
-    if not project:
-        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
-        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
-        return JSONResponse(
-            status_code=response_status,
-            content={
-                "signal": response_signal
-            }
-        )
+    # Project access check removed
+    project = SimpleNamespace(project_id=project_id)
 
     asset_model = await AssetModel.create_instance(
         db_client=request.app.db_client

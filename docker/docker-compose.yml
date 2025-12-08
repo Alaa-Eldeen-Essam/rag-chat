@@ -19,8 +19,8 @@ services:
         condition: service_started
       ollama_embed:
         condition: service_started
-      ollama_reranker:
-        condition: service_started
+      # ollama_reranker:
+      #   condition: service_started
     env_file:
       - ./env/.env.app
     environment:
@@ -52,18 +52,23 @@ services:
     restart: always
     gpus: all
 
-  # Dedicated Ollama instance for reranking
+  # Dedicated Infinity instance for reranking
   ollama_reranker:
-    image: ollama/ollama:latest
+    image: michaelf34/infinity:latest
     container_name: ollama_reranker
+    command: v2 --model-id $RERANKER_MODEL_ID --port 11434
+    env_file:
+      - ./env/.env.app
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+    volumes:
+      - ollama_reranker_data:/app/.cache/huggingface
     ports:
       - "11435:11434"
-    volumes:
-      - ollama_reranker_data:/root/.ollama
     networks:
       - backend
     restart: always
-    gpus: all
 
   # vLLM Service for chat
   vllm_chat:
