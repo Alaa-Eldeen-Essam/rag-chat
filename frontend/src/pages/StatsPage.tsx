@@ -505,9 +505,7 @@ export const StatsPage: React.FC = () => {
                           <th className="px-3 py-2 text-right">
                             {uiText('averageRating')}
                           </th>
-                          <th className="px-3 py-2 text-right">
-                            {uiText('fallback') || 'Fallback %'}
-                          </th>
+                          
                         </tr>
                       </thead>
                       <tbody>
@@ -530,11 +528,6 @@ export const StatsPage: React.FC = () => {
                             </td>
                             <td className="px-3 py-2 text-right">
                               {doc.avg_rating != null ? doc.avg_rating.toFixed(1) : '-'}
-                            </td>
-                            <td className="px-3 py-2 text-right">
-                              {doc.fallback_rate != null
-                                ? `${(doc.fallback_rate * 100).toFixed(0)}%`
-                                : '-'}
                             </td>
                           </tr>
                         ))}

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sidebar } from '../components/Sidebar';
 import { ChatMessageBubble, ChatRole } from '../components/ChatMessage';
 import { useSettings, ModelKind } from '../settings/SettingsContext';
@@ -21,6 +21,13 @@ interface MessageSource {
   page?: number;
   excerpt_index?: number;
   snippet?: string;
+}
+
+interface GroupedSources {
+  key: string;
+  title: string;
+  count: number;
+  sources: MessageSource[];
 }
 
 interface HistoryMessage {
@@ -98,6 +105,10 @@ export const ChatPage: React.FC = () => {
     Record<string, 'helpful' | 'unhelpful'>
   >({});
   const [expandedResourcesByMessage, setExpandedResourcesByMessage] = useState<Record<string, boolean>>({});
+  const [openResourcePanel, setOpenResourcePanel] = useState<{
+    messageId: string;
+    fileKey: string;
+  } | null>(null);
   const [docTypes, setDocTypes] = useState<string[]>([]);
   const [summaryWidth, setSummaryWidth] = useState<number>(320);
   const [isResizingSummary, setIsResizingSummary] = useState(false);
@@ -202,6 +213,24 @@ export const ChatPage: React.FC = () => {
     });
   }, [chatAssetsForCurrentDocType, fileDropdownQuery]);
 
+  const groupSourcesByFile = useCallback((sources: MessageSource[]): GroupedSources[] => {
+    const groups: Record<string, GroupedSources> = {};
+    sources.forEach((src, idx) => {
+      const title =
+        (src.file_name && src.file_name.trim()) ||
+        (src.excerpt_index != null
+          ? `${uiText('asset')} #${src.excerpt_index}`
+          : `${uiText('asset')} #${idx + 1}`);
+      const key = title.toLowerCase();
+      if (!groups[key]) {
+        groups[key] = { key, title, count: 0, sources: [] };
+      }
+      groups[key].sources.push(src);
+      groups[key].count += 1;
+    });
+    return Object.values(groups);
+  }, [uiText]);
+
   // When the global doc type changes (via the header dropdown),
   // reset any per-chat file filters and related search query so
   // the filter always reflects the currently selected doc type.
@@ -238,6 +267,17 @@ export const ChatPage: React.FC = () => {
     }
     return `${assetFilterIds.length} ${uiText('filesSelected')}`;
   }, [assetFilterIds, summaryAssets, uiText]);
+
+  useEffect(() => {
+    if (!openResourcePanel) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpenResourcePanel(null);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [openResourcePanel]);
 
   useEffect(() => {
     if (!isResizingSummary) return;
@@ -586,6 +626,17 @@ export const ChatPage: React.FC = () => {
       })
       .catch(() => setDocTypes([]));
   }, [request, docTypesVersion]);
+
+  const activeResourcePanel = useMemo(() => {
+    if (!openResourcePanel) return null;
+    const msg = messages.find(m => m.id === openResourcePanel.messageId);
+    if (!msg || !msg.sources) return null;
+    const grouped = groupSourcesByFile(msg.sources || []);
+    const group =
+      grouped.find(g => g.key === openResourcePanel.fileKey) || grouped[0];
+    if (!group) return null;
+    return { group, messageId: msg.id };
+  }, [groupSourcesByFile, messages, openResourcePanel]);
 
   return (
     <>
@@ -959,69 +1010,70 @@ export const ChatPage: React.FC = () => {
                   />
                   {m.role === 'assistant' &&
                     m.sources &&
-                    m.sources.length > 0 && (
-                      <div className="pl-4 md:pl-10">
-                        <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-3 py-2 text-[14px] text-slate-600 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-slate-800">
-                              {uiText('resources')} ({m.sources.length})
-                            </span>
-                            <button
-                              type="button"
-                              className="text-[10px] text-[color:var(--accent-strong)] underline hover:text-[color:var(--accent)]"
-                              onClick={() => toggleResourcesForMessage(m.id)}
-                            >
-                              {expandedResourcesByMessage[m.id]
-                                ? uiLanguage === 'ar'
-                                  ? 'إخفاء'
-                                  : 'Hide'
-                                : uiLanguage === 'ar'
-                                ? 'عرض'
-                                : 'Show'}
-                            </button>
-                          </div>
-                          {expandedResourcesByMessage[m.id] && (
-                            <div className="space-y-2">
-                              {m.sources.map((s, idx) => {
-                                const loc =
-                                  s.page && Number.isFinite(s.page)
-                                    ? `${uiText('page')} ${s.page}`
-                                    : s.location && typeof s.location === 'string'
-                                    ? s.location
-                                    : `${uiText('excerpt')} ${idx + 1}`;
-                                const snippet =
-                                  s.snippet && s.snippet.length > 380
-                                    ? `${s.snippet.slice(0, 377)}...`
-                                    : s.snippet;
-                                return (
-                                  <div
-                                    key={`${m.id}-src-${idx}`}
-                                    className="border border-[color:var(--border-subtle)] rounded-xl px-3 py-2 bg-white shadow-sm"
-                                  >
-                                    <div className="flex items-center gap-2 text-slate-700">
-                                      <span className="inline-flex items-center justify-center rounded-full bg-[color:var(--bg-soft)] px-2 py-0.5 text-[9px] text-slate-500">
-                                        #{s.excerpt_index || idx + 1}
-                                      </span>
-                                      <span className="truncate">
-                                        {s.file_name || uiText('source')}
-                                      </span>
-                                      <span className="text-slate-400 truncate">
-                                        — {loc}
-                                      </span>
-                                    </div>
-                                    {snippet && (
-                                      <div className="mt-1 text-[10px] text-slate-700 whitespace-pre-wrap">
-                                        {snippet}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
+                    m.sources.length > 0 && (() => {
+                      const grouped = groupSourcesByFile(m.sources || []);
+                      const isExpanded = !!expandedResourcesByMessage[m.id];
+                      return (
+                        <div className="pl-4 md:pl-10">
+                          <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-4 py-3 text-[15px] text-slate-700 space-y-3">
+                            <div className={`flex flex-wrap items-center justify-between gap-2 ${isRTL ? 'text-right' : 'text-left'}`}>
+                              <div className="flex items-center gap-3">
+                                <span className="font-semibold text-slate-900 text-base">
+                                  {uiText('resources')} ({m.sources.length})
+                                </span>
+                                <span className="text-xs text-slate-500">
+                                  {grouped.length} {uiLanguage === 'ar' ? 'ملفات' : 'files'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-[11px]">
+                                <button
+                                  type="button"
+                                  className="text-[11px] text-[color:var(--accent-strong)] underline hover:text-[color:var(--accent)]"
+                                  onClick={() => toggleResourcesForMessage(m.id)}
+                                >
+                                  {isExpanded
+                                    ? uiLanguage === 'ar'
+                                      ? 'إخفاء'
+                                      : 'Hide'
+                                    : uiLanguage === 'ar'
+                                    ? 'عرض'
+                                    : 'Show'}
+                                </button>
+                              </div>
                             </div>
-                          )}
+                            {isExpanded && (
+                              <div className="flex flex-wrap gap-2" dir={isRTL ? 'rtl' : 'ltr'}>
+                                {grouped.map(group => (
+                                  <button
+                                    key={`${m.id}-${group.key}`}
+                                    type="button"
+                                    onClick={() =>
+                                      setOpenResourcePanel({
+                                        messageId: m.id,
+                                        fileKey: group.key
+                                      })
+                                    }
+                                    className="group flex items-center justify-between gap-3 rounded-xl border border-[color:var(--border-subtle)] bg-white px-3 py-2 shadow-sm hover:border-[color:var(--accent)] transition text-left min-w-[160px]"
+                                  >
+                                    <div className="flex-1 min-w-0">
+                                      <div className="font-semibold text-[15px] text-slate-900 truncate group-hover:text-[color:var(--accent-strong)]">
+                                        {group.title}
+                                      </div>
+                                      <div className="text-[11px] text-slate-500 truncate">
+                                        {uiLanguage === 'ar' ? 'عرض المقاطع' : 'View excerpts'}
+                                      </div>
+                                    </div>
+                                    <span className="inline-flex items-center justify-center rounded-full bg-[color:var(--bg-soft)] px-2 py-1 text-[11px] text-slate-700 border border-[color:var(--border-subtle)]">
+                                      {group.count}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                   {m.role === 'assistant' && (
                     <div className="pl-4 md:pl-10 text-[11px] text-slate-500 flex gap-3">
                       {(() => {
@@ -1286,6 +1338,77 @@ export const ChatPage: React.FC = () => {
           )}
         </div>
       </section>
+      {activeResourcePanel && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center md:justify-end bg-[rgba(15,23,42,0.4)] backdrop-blur-sm p-4"
+          role="dialog"
+          aria-modal="true"
+          dir={isRTL ? 'rtl' : 'ltr'}
+          onMouseDown={e => {
+            if (e.target === e.currentTarget) {
+              setOpenResourcePanel(null);
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-3xl md:max-w-xl h-[80vh] md:h-[90vh] rounded-3xl bg-white border border-[color:var(--border-subtle)] shadow-2xl flex flex-col overflow-hidden"
+            onMouseDown={e => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)]">
+              <div className="min-w-0">
+                <div className="text-lg font-semibold text-slate-900 truncate">
+                  {activeResourcePanel.group.title}
+                </div>
+                <div className="text-[12px] text-slate-500">
+                  {activeResourcePanel.group.count}{' '}
+                  {uiLanguage === 'ar' ? 'مقتطفات' : 'excerpts'}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-subtle)] bg-white px-3 py-1.5 text-[12px] font-semibold text-[color:var(--accent-strong)] shadow-sm hover:border-[color:var(--accent)] hover:text-[color:var(--accent)]"
+                onClick={() => setOpenResourcePanel(null)}
+              >
+                <span aria-hidden="true">×</span>
+                <span className="text-[12px] font-semibold">{uiText('close')}</span>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 text-sm leading-relaxed">
+              {activeResourcePanel.group.sources.map((src, idx) => {
+                const loc =
+                  src.page && Number.isFinite(src.page)
+                    ? `${uiText('page')} ${src.page}`
+                    : src.location && typeof src.location === 'string'
+                    ? src.location
+                    : `${uiText('excerpt')} ${idx + 1}`;
+                const snippet = src.snippet || '';
+                return (
+                  <div
+                    key={`${activeResourcePanel.messageId}-panel-${idx}`}
+                    className="rounded-2xl border border-[color:var(--border-subtle)] bg-white px-4 py-3 shadow-sm"
+                  >
+                    <div className={`flex items-center justify-between gap-2 ${isRTL ? 'flex-row-reverse' : ''}`}>
+                      <div className="flex items-center gap-2 text-[12px] text-slate-600">
+                        <span className="inline-flex items-center justify-center rounded-full bg-[color:var(--bg-soft)] px-2 py-1 text-[11px] text-slate-700 border border-[color:var(--border-subtle)]">
+                          #{src.excerpt_index || idx + 1}
+                        </span>
+                        <span className="text-[12px] text-slate-500 truncate max-w-[160px]">
+                          {loc}
+                        </span>
+                      </div>
+                    </div>
+                    {snippet && (
+                      <div className="mt-2 text-[14px] leading-relaxed text-slate-800 whitespace-pre-wrap">
+                        {snippet}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
       <UploadModal
         open={showUpload}
         onClose={() => setShowUpload(false)}
