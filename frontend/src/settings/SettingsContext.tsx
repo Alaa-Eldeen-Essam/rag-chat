@@ -22,7 +22,7 @@ export interface SettingsState {
   docTypesVersion: number;
   currentUserDepartment?: string | null;
   uiLanguage: 'en' | 'ar';
-  uiTheme: 'lumina' | 'neon' | 'dawn' | 'slate';
+  uiTheme: 'slate' | 'aqua' | 'aurora' | 'ember';
   authToken: string | null;
   authTokenExpiresAt: number | null;
 }
@@ -62,7 +62,7 @@ const defaultState: SettingsState = {
   docTypesVersion: 0,
   currentUserDepartment: null,
   uiLanguage: 'en',
-  uiTheme: 'lumina',
+  uiTheme: 'slate',
   authToken: null,
   authTokenExpiresAt: null
 };
@@ -88,9 +88,9 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({
       }
       if (
         parsed.uiTheme !== 'slate' &&
-        parsed.uiTheme !== 'lumina' &&
-        parsed.uiTheme !== 'neon' &&
-        parsed.uiTheme !== 'dawn'
+        parsed.uiTheme !== 'aqua' &&
+        parsed.uiTheme !== 'aurora' &&
+        parsed.uiTheme !== 'ember'
       ) {
         base.uiTheme = defaultState.uiTheme;
       }

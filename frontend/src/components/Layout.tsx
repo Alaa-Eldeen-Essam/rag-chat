@@ -150,21 +150,21 @@ export const AppLayout: React.FC = () => {
             onChange={e =>
               setSettings(prev => ({
                 ...prev,
-                uiTheme: e.target.value as 'lumina' | 'neon' | 'dawn' | 'slate'
+                uiTheme: e.target.value as 'slate' | 'aqua' | 'aurora' | 'ember'
               }))
             }
           >
-            <option value="lumina">
-              {uiLanguage === 'ar' ? 'لمينا' : 'Lumina'}
-            </option>
-            <option value="neon">
-              {uiLanguage === 'ar' ? 'نيون' : 'Neon'}
-            </option>
-            <option value="dawn">
-              {uiLanguage === 'ar' ? 'الفجر' : 'Dawn'}
-            </option>
             <option value="slate">
               {uiLanguage === 'ar' ? 'كلاسيكي' : 'Classic'}
+            </option>
+            <option value="aqua">
+              {uiLanguage === 'ar' ? 'أزرق فاتح' : 'Aqua'}
+            </option>
+            <option value="aurora">
+              {uiLanguage === 'ar' ? 'أورورا' : 'Aurora'}
+            </option>
+            <option value="ember">
+              {uiLanguage === 'ar' ? 'ايمبر' : 'Ember'}
             </option>
           </select>
           <div className="relative">
