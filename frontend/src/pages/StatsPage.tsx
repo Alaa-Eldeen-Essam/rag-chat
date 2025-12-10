@@ -588,7 +588,7 @@ export const StatsPage: React.FC = () => {
                       {uiText('documents')}
                     </th>
                     <th className="px-3 py-2 text-right text-[11px] font-semibold tracking-wide uppercase text-theme-muted">
-                      {uiText('avgMs')}
+                      {uiLanguage === 'ar' ? ' متوسط الثواني' : 'Average Seconds'}
                     </th>
                     <th className={`px-3 py-2 text-[11px] font-semibold tracking-wide uppercase text-theme-muted ${isRTL ? 'text-right' : 'text-left'}`}>
                       {uiText('lastActive')}
@@ -619,7 +619,9 @@ export const StatsPage: React.FC = () => {
                         <span className="text-theme-strong">{u.total_documents}</span>
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <span className="text-theme-strong">{u.avg_response_ms}</span>
+                        <span className="text-theme-strong">
+                          {((u.avg_response_ms ?? 0) / 1000).toFixed(2)}
+                        </span>
                       </td>
                       <td className="px-3 py-2">
                         {u.last_active_at ? new Date(u.last_active_at).toLocaleString() : '—'}

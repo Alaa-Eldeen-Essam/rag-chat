@@ -417,9 +417,6 @@ export const AdminUsersPage: React.FC = () => {
             <thead className="bg-slate-50">
               <tr>
                 <th className={`px-3 py-2 border-b border-slate-200 text-[11px] font-semibold tracking-wide uppercase text-slate-500 ${isRTL ? 'text-right' : 'text-left'}`}>
-                  {uiText('id')}
-                </th>
-                <th className={`px-3 py-2 border-b border-slate-200 text-[11px] font-semibold tracking-wide uppercase text-slate-500 ${isRTL ? 'text-right' : 'text-left'}`}>
                   {uiText('username')}
                 </th>
                 <th className={`px-2 py-1 border-b border-slate-800 ${isRTL ? 'text-right' : 'text-left'}`}>
@@ -442,9 +439,6 @@ export const AdminUsersPage: React.FC = () => {
             <tbody>
               {filteredUsers.map(u => (
                 <tr key={u.id} className="odd:bg-white even:bg-slate-50/60 hover:bg-sky-50 transition">
-                  <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
-                    {u.id}
-                  </td>
                   <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
                     {editingUsernameId === u.id ? (
                       <div className="flex items-center gap-1">

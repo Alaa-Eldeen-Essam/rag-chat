@@ -53,6 +53,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [docTypes, setDocTypes] = useState<string[]>([]);
   const [selectedDocType, setSelectedDocType] = useState('');
   const [customDocType, setCustomDocType] = useState('');
+  const [useCustomDocType, setUseCustomDocType] = useState(false);
   const { request } = useHttpClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -60,6 +61,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     if (!open) return;
     setCustomDocType('');
     setSelectedDocType('');
+    setUseCustomDocType(false);
     setUseCustomDepartment(false);
     if (!currentUserIsAdmin) {
       const dept = currentUserDepartment || 'Global';
@@ -129,8 +131,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       const form = new FormData();
       files.forEach(f => form.append('files', f));
       const chosenDocType =
-        (customDocType && customDocType.trim()) ||
-        (selectedDocType && selectedDocType.trim()) ||
+        (useCustomDocType
+          ? customDocType && customDocType.trim()
+          : selectedDocType && selectedDocType.trim()) ||
         docType.trim();
       if (!chosenDocType) {
         setError(uiText('docTypeRequired'));
@@ -234,7 +237,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="text-[11px] text-slate-400 hover:text-slate-700"
+            className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-subtle)] bg-white px-3 py-1 text-[11px] font-semibold text-[color:var(--accent-strong)] shadow-sm hover:border-[color:var(--accent)] hover:text-[color:var(--accent)]"
           >
             {uiText('close')}
           </button>
@@ -276,11 +279,32 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           <div className="flex flex-col gap-2">
             <label className="text-slate-600">
               <span className="block mb-1">{uiText('docType')}</span>
+              <div className="flex items-center gap-3 text-[11px] text-slate-500 mb-1">
+                <label className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    name="doctype-mode"
+                    checked={!useCustomDocType}
+                    onChange={() => setUseCustomDocType(false)}
+                  />
+                  <span>{uiText('chooseExisting')}</span>
+                </label>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    name="doctype-mode"
+                    checked={useCustomDocType}
+                    onChange={() => setUseCustomDocType(true)}
+                  />
+                  <span>{uiText('enterNew')}</span>
+                </label>
+              </div>
               {docTypes.length > 0 && (
                 <select
-                  className="w-full rounded-lg bg-[color:var(--bg-soft)] border border-[color:var(--border-subtle)] px-2 py-1 text-xs mb-1"
+                  className="w-full rounded-lg bg-[color:var(--bg-soft)] border border-[color:var(--border-subtle)] px-2 py-1 text-xs mb-1 disabled:bg-slate-100 disabled:text-slate-400"
                   value={selectedDocType}
                   onChange={e => setSelectedDocType(e.target.value)}
+                  disabled={useCustomDocType}
                 >
                   {docTypes.map(dt => (
                     <option key={dt} value={dt}>
@@ -290,7 +314,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 </select>
               )}
               <input
-                className="w-full rounded-lg bg-[color:var(--bg-soft)] border border-[color:var(--border-subtle)] px-2 py-1 mt-1 text-xs"
+                className="w-full rounded-lg bg-[color:var(--bg-soft)] border border-[color:var(--border-subtle)] px-2 py-1 mt-1 text-xs disabled:bg-slate-100 disabled:text-slate-400"
                 value={customDocType}
                 onChange={e => setCustomDocType(e.target.value)}
                 placeholder={
@@ -298,6 +322,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                     ? uiText('docTypePlaceholder')
                     : uiText('docTypePlaceholderRequired')
                 }
+                disabled={!useCustomDocType}
               />
             </label>
             <div className="flex items-center gap-4">
