@@ -23,3 +23,4 @@ class UserAdminUpdateRequest(BaseModel):
 class UserBasicUpdateRequest(BaseModel):
     username: Optional[constr(min_length=3, max_length=128)] = None
     reset_password: Optional[bool] = False
+    new_password: Optional[constr(min_length=6, max_length=256)] = None

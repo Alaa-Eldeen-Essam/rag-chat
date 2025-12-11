@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 
 class ProcessRequest(BaseModel):
@@ -12,3 +12,8 @@ class ProcessRequest(BaseModel):
 
 class UpdateDocTypeRequest(BaseModel):
     doc_type: str
+
+
+class UpdateVisibilityRequest(BaseModel):
+    visibility: str
+    departments: Optional[List[str]] = None

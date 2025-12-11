@@ -18,6 +18,7 @@ from sqlalchemy import select, delete, update, func
 from models.AssetModel import AssetModel
 from models.ChunkModel import ChunkModel
 from models.SummaryModel import SummaryModel
+from helpers.security import hash_password
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -149,8 +150,6 @@ async def admin_create_user(
     user_model = await UserModel.create_instance(
         db_client=request.app.db_client
     )
-
-    from helpers.security import hash_password
 
     existing_user = await user_model.get_user_by_username(
         username=create_request.username
@@ -454,11 +453,15 @@ async def update_user_basic(
     if update_request.username:
         await user_model.update_username(user_id=user_id, username=update_request.username)
 
-    if update_request.reset_password:
-        from helpers.security import hash_password
+    password_to_set: str | None = None
+    if update_request.new_password:
+        password_to_set = update_request.new_password
+    elif update_request.reset_password:
+        password_to_set = "123456"
 
-        default_password_hash = hash_password(password="123456")
-        await user_model.reset_password(user_id=user_id, password_hash=default_password_hash)
+    if password_to_set:
+        password_hash = hash_password(password=password_to_set)
+        await user_model.reset_password(user_id=user_id, password_hash=password_hash)
 
     async with request.app.db_client() as session:
         result = await session.execute(select(User).where(User.id == user_id))

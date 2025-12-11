@@ -7,7 +7,7 @@ from controllers import DataController, ProjectController, ProcessController, NL
 import aiofiles
 from models import ResponseSignal
 import logging
-from .schemes.data import ProcessRequest, UpdateDocTypeRequest
+from .schemes.data import ProcessRequest, UpdateDocTypeRequest, UpdateVisibilityRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
 from models.AssetModel import AssetModel
@@ -34,6 +34,25 @@ def normalize_document_type(value: str) -> str:
         return DOCUMENT_TYPE_DEFAULT
     normalized = value.strip()
     return normalized if normalized else DOCUMENT_TYPE_DEFAULT
+
+
+def normalize_department_list(values: Optional[List[str]]):
+    if not values:
+        return []
+    cleaned = []
+    seen = set()
+    for entry in values:
+        if not entry:
+            continue
+        value = str(entry).strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(value)
+    return cleaned
 
 @data_router.post("/upload/{project_id}")
 async def upload_data(
@@ -109,9 +128,13 @@ async def upload_data(
     vis = (visibility or "").strip().lower()
     if vis not in ("private", "department", "global"):
         vis = "private" if is_private else "global"
+    department_list = normalize_department_list(department)
     effective_department = None
     if vis == "department":
-        effective_department =  effective_department = (department or getattr(current_user, "department", None) or "Global")
+        if not department_list:
+            fallback_dept = getattr(current_user, "department", None) or "Global"
+            department_list = [fallback_dept]
+        effective_department = department_list
 
     if not doc_type or not doc_type.strip():
         return JSONResponse(
@@ -233,9 +256,13 @@ async def upload_process_index(
     vis = (visibility or "").strip().lower()
     if vis not in ("private", "department", "global"):
         vis = "private" if is_private else "global"
+    department_list = normalize_department_list(department)
     effective_department = None
     if vis == "department":
-        effective_department = (department or getattr(current_user, "department", None) or "Global")
+        if not department_list:
+            fallback_dept = getattr(current_user, "department", None) or "Global"
+            department_list = [fallback_dept]
+        effective_department = department_list
 
     normalized_doc_type = normalize_document_type(doc_type)
     asset_resource = Asset(
@@ -414,12 +441,13 @@ async def upload_process_index_batch(
     vis = (visibility or "").strip().lower()
     if vis not in ("private", "department", "global"):
         vis = "private" if is_private else "global"
+    department_list = normalize_department_list(department)
     effective_department = None
     if vis == "department":
-        if department:
-            effective_department = department
-        else:
-            effective_department = (getattr(current_user, "department", None) or "Global")
+        if not department_list:
+            fallback_dept = getattr(current_user, "department", None) or "Global"
+            department_list = [fallback_dept]
+        effective_department = department_list
 
     if not doc_type or not doc_type.strip():
         return JSONResponse(
@@ -823,6 +851,7 @@ async def list_assets(
                 "is_private": asset.asset_is_private,
                 "visibility": getattr(asset, "asset_visibility", None),
                 "department": getattr(asset, "asset_department", None),
+                "departments": getattr(asset, "asset_department", None),
                 "size": asset.asset_size,
                 "created_at": asset.created_at.isoformat() if getattr(asset, "created_at", None) else None,
                 "updated_at": asset.updated_at.isoformat() if getattr(asset, "updated_at", None) else None,
@@ -1041,5 +1070,77 @@ async def update_asset_doc_type(
             "signal": ResponseSignal.FILE_UPLOAD_SUCCESS.value,
             "asset_id": asset_record.asset_id,
             "doc_type": new_doc_type,
+        }
+    )
+
+
+@data_router.patch("/assets/{asset_id}/visibility")
+async def update_asset_visibility(
+    request: Request,
+    asset_id: int,
+    update_request: UpdateVisibilityRequest,
+    current_user: User = Depends(get_current_user),
+):
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user,
+    )
+
+    if asset_record is None:
+        if exists_or_forbidden:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
+                },
+            )
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.FILE_ID_ERROR.value
+            },
+        )
+
+    is_owner = asset_record.asset_user_id == getattr(current_user, "id", None)
+    is_admin = getattr(current_user, "is_admin", False)
+    if not (is_owner or is_admin):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Only the file owner or an admin can modify this file.",
+            },
+        )
+
+    vis = (update_request.visibility or "").strip().lower()
+    if vis not in ("private", "department", "global"):
+        vis = "private"
+
+    departments = normalize_department_list(update_request.departments)
+    if vis == "department" and not departments:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Department visibility requires at least one department."
+            }
+        )
+
+    await asset_model.update_visibility(asset_record.asset_id, vis)
+    if vis == "department":
+        normalized = await asset_model.set_asset_departments(asset_record.asset_id, departments)
+    else:
+        normalized = await asset_model.set_asset_departments(asset_record.asset_id, [])
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_LIST_SUCCESS.value,
+            "visibility": vis,
+            "is_private": vis == "private",
+            "departments": normalized,
         }
     )

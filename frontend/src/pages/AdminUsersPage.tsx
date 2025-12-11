@@ -52,6 +52,10 @@ export const AdminUsersPage: React.FC = () => {
   const [roleFilter, setRoleFilter] = useState<RoleFilter>('all');
   const [userPendingDelete, setUserPendingDelete] = useState<UserRow | null>(null);
   const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
+  const [passwordModalUser, setPasswordModalUser] = useState<UserRow | null>(null);
+  const [newPasswordValue, setNewPasswordValue] = useState('');
+  const [showPasswordValue, setShowPasswordValue] = useState(false);
+  const [changingPasswordId, setChangingPasswordId] = useState<number | null>(null);
 
   const pageSize = 50;
 
@@ -164,14 +168,9 @@ export const AdminUsersPage: React.FC = () => {
   };
 
   const handleResetPassword = async (user: UserRow) => {
-    try {
-      await request(`/api/v1/users/users/${user.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ reset_password: true })
-      });
-    } catch (err: any) {
-      setError(err.message || uiText('resetPassword'));
-    }
+    setPasswordModalUser(user);
+    setNewPasswordValue('');
+    setShowPasswordValue(false);
   };
 
   const requestDeleteUser = (user: UserRow) => {
@@ -214,6 +213,32 @@ export const AdminUsersPage: React.FC = () => {
   });
   const adminCount = users.filter(u => u.is_admin).length;
   const memberCount = users.length - adminCount;
+
+  const submitPasswordChange = async (target: UserRow) => {
+    const trimmed = newPasswordValue.trim();
+    if (trimmed.length < 6) {
+      setError(
+        uiLanguage === 'ar'
+          ? 'يجب أن تكون كلمة المرور 6 أحرف على الأقل.'
+          : 'Password must be at least 6 characters.'
+      );
+      return;
+    }
+    setChangingPasswordId(target.id);
+    try {
+      await request(`/api/v1/users/users/${target.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ new_password: trimmed })
+      });
+      setPasswordModalUser(null);
+      setNewPasswordValue('');
+      setShowPasswordValue(false);
+    } catch (err: any) {
+      setError(err?.message || uiText('resetPassword'));
+    } finally {
+      setChangingPasswordId(null);
+    }
+  };
 
   return (
     <section className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -275,6 +300,7 @@ export const AdminUsersPage: React.FC = () => {
             </label>
             <input
               type={showPassword ? 'text' : 'password'}
+              autoComplete="new-password"
               className="w-full rounded-2xl bg-white border border-slate-200 px-4 py-2 pr-12 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
@@ -358,6 +384,7 @@ export const AdminUsersPage: React.FC = () => {
             <div className="relative w-full md:w-64">
               <input
                 className="w-full rounded-full bg-white border border-slate-200 pl-9 pr-10 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                autoComplete="off"
                 placeholder={uiText('searchUsersPlaceholder')}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
@@ -402,6 +429,80 @@ export const AdminUsersPage: React.FC = () => {
       {error && <div className="text-xs text-red-400">{error}</div>}
       {loading && (
         <div className="text-xs text-slate-400">{uiText('loadingUsers')}</div>
+      )}
+      {passwordModalUser && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.45)] backdrop-blur-sm p-4">
+          <div className="app-card w-full max-w-sm p-6 space-y-4 text-xs">
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-theme-muted">
+                {uiLanguage === 'ar' ? 'تغيير كلمة المرور' : 'Change password'}
+              </p>
+              <h3 className="text-lg font-semibold text-slate-900">
+                {uiLanguage === 'ar'
+                  ? `تعيين كلمة مرور جديدة لـ "${passwordModalUser.username}"`
+                  : `Set a new password for "${passwordModalUser.username}"`}
+              </h3>
+              <p className="text-xs text-theme-muted mt-2">
+                {uiLanguage === 'ar'
+                  ? 'أدخل كلمة المرور الجديدة وسيتم تطبيقها فوراً.'
+                  : 'Enter a new password and it will take effect immediately.'}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[11px] text-theme-muted">
+                {uiLanguage === 'ar' ? 'كلمة المرور الجديدة' : 'New password'}
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type={showPasswordValue ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  className="flex-1 rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]"
+                  value={newPasswordValue}
+                  onChange={e => setNewPasswordValue(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn-chip px-3 py-1 text-[11px]"
+                  onClick={() => setShowPasswordValue(prev => !prev)}
+                >
+                  {showPasswordValue
+                    ? uiLanguage === 'ar'
+                      ? 'إخفاء'
+                      : 'Hide'
+                    : uiLanguage === 'ar'
+                    ? 'إظهار'
+                    : 'Show'}
+                </button>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-chip px-4 py-2"
+                onClick={() => {
+                  if (changingPasswordId) return;
+                  setPasswordModalUser(null);
+                  setNewPasswordValue('');
+                  setShowPasswordValue(false);
+                }}
+              >
+                {uiText('cancel')}
+              </button>
+              <button
+                type="button"
+                className="btn-action px-4 py-2"
+                disabled={changingPasswordId === passwordModalUser.id}
+                onClick={() => passwordModalUser && submitPasswordChange(passwordModalUser)}
+              >
+                {changingPasswordId === passwordModalUser.id
+                  ? uiText('loading')
+                  : uiLanguage === 'ar'
+                  ? 'حفظ'
+                  : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {!loading && filteredUsers.length === 0 && !error && (
         <div className="text-xs text-slate-500">
@@ -562,7 +663,7 @@ export const AdminUsersPage: React.FC = () => {
                         onClick={() => handleResetPassword(u)}
                         className="btn-action px-3 py-1 text-[11px]"
                       >
-                        {uiText('resetPassword')}
+                        {uiLanguage === 'ar' ? 'تغيير كلمة المرور' : 'Change password'}
                       </button>
                       <button
                         type="button"
@@ -638,6 +739,80 @@ export const AdminUsersPage: React.FC = () => {
                 {deletingUserId === userPendingDelete.id
                   ? uiText('loading')
                   : uiText('delete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {passwordModalUser && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.45)] backdrop-blur-sm p-4">
+          <div className="app-card w-full max-w-sm p-6 space-y-4 text-xs">
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-theme-muted">
+                {uiLanguage === 'ar' ? 'تغيير كلمة المرور' : 'Change password'}
+              </p>
+              <h3 className="text-lg font-semibold text-slate-900">
+                {uiLanguage === 'ar'
+                  ? `تعيين كلمة مرور جديدة لـ "${passwordModalUser.username}"`
+                  : `Set a new password for "${passwordModalUser.username}"`}
+              </h3>
+              <p className="text-xs text-theme-muted mt-2">
+                {uiLanguage === 'ar'
+                  ? 'أدخل كلمة المرور الجديدة وسيتم تطبيقها فوراً.'
+                  : 'Enter a new password and it will take effect immediately.'}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[11px] text-theme-muted">
+                {uiLanguage === 'ar' ? 'كلمة المرور الجديدة' : 'New password'}
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type={showPasswordValue ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  className="flex-1 rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]"
+                  value={newPasswordValue}
+                  onChange={e => setNewPasswordValue(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn-chip px-3 py-1 text-[11px]"
+                  onClick={() => setShowPasswordValue(prev => !prev)}
+                >
+                  {showPasswordValue
+                    ? uiLanguage === 'ar'
+                      ? 'إخفاء'
+                      : 'Hide'
+                    : uiLanguage === 'ar'
+                    ? 'إظهار'
+                    : 'Show'}
+                </button>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-chip px-4 py-2"
+                onClick={() => {
+                  if (changingPasswordId) return;
+                  setPasswordModalUser(null);
+                  setNewPasswordValue('');
+                  setShowPasswordValue(false);
+                }}
+              >
+                {uiText('cancel')}
+              </button>
+              <button
+                type="button"
+                className="btn-action px-4 py-2"
+                disabled={changingPasswordId === passwordModalUser.id}
+                onClick={() => passwordModalUser && submitPasswordChange(passwordModalUser)}
+              >
+                {changingPasswordId === passwordModalUser.id
+                  ? uiText('loading')
+                  : uiLanguage === 'ar'
+                  ? 'حفظ'
+                  : 'Save'}
               </button>
             </div>
           </div>

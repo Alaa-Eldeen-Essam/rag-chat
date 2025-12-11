@@ -124,3 +124,51 @@ class AssetModel(BaseDataModel):
             async with session.begin():
                 await session.delete(asset)
             await session.commit()
+
+    def _normalize_departments(self, departments):
+        if not departments:
+            return []
+        normalized = []
+        seen = set()
+        for entry in departments:
+            if not entry:
+                continue
+            value = str(entry).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        return normalized
+
+    async def set_asset_departments(self, asset_id: int, departments):
+        normalized = self._normalize_departments(departments)
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    Asset.__table__.update()
+                    .where(Asset.asset_id == asset_id)
+                    .values(asset_department=normalized or None)
+                )
+            await session.commit()
+        return normalized
+
+    async def update_visibility(self, asset_id: int, visibility: str):
+        vis = (visibility or "private").strip().lower()
+        if vis not in ("private", "department", "global"):
+            vis = "private"
+        is_private = vis == "private"
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    Asset.__table__.update()
+                    .where(Asset.asset_id == asset_id)
+                    .values(
+                        asset_visibility=vis,
+                        asset_is_private=is_private,
+                    )
+                )
+            await session.commit()
+        return vis, is_private
