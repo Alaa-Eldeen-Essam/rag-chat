@@ -24,7 +24,7 @@ class Asset(SQLAlchemyBase):
     # Visibility: "private" | "department" | "global"
     asset_visibility = Column(String, nullable=False, default="private")
     # Department for department-level visibility
-    asset_department = Column(String, nullable=True)
+    asset_department = Column(JSONB, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)

@@ -43,7 +43,7 @@ async def upload_data(
     is_private: bool = Form(True),
     doc_type: str = Form(""),
     visibility: str = Form("private"),
-    department: Optional[str] = Form(None),
+    department: List[str] = Form([]),
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
@@ -111,7 +111,7 @@ async def upload_data(
         vis = "private" if is_private else "global"
     effective_department = None
     if vis == "department":
-        effective_department = (department or getattr(current_user, "department", None) or "Global")
+        effective_department =  effective_department = (department or getattr(current_user, "department", None) or "Global")
 
     if not doc_type or not doc_type.strip():
         return JSONResponse(
@@ -163,7 +163,7 @@ async def upload_process_index(
     is_private: bool = Form(True),
     doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
     visibility: str = Form("private"),
-    department: Optional[str] = Form(None),
+    department: List[str] = Form([]),
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
@@ -368,7 +368,7 @@ async def upload_process_index_batch(
     is_private: bool = Form(True),
     doc_type: str = Form(""),
     visibility: str = Form("private"),
-    department: Optional[str] = Form(None),
+    department: List[str] = Form([]),
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
@@ -416,9 +416,10 @@ async def upload_process_index_batch(
         vis = "private" if is_private else "global"
     effective_department = None
     if vis == "department":
-        effective_department = (
-            department or getattr(current_user, "department", None) or "Global"
-        )
+        if department:
+            effective_department = department
+        else:
+            effective_department = (getattr(current_user, "department", None) or "Global")
 
     if not doc_type or not doc_type.strip():
         return JSONResponse(

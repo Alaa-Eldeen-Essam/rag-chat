@@ -47,7 +47,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [visibility, setVisibility] = useState<'private' | 'department' | 'global'>('private');
   const [departments, setDepartments] = useState<string[]>([]);
   const [deptQuery, setDeptQuery] = useState('');
-  const [selectedDepartment, setSelectedDepartment] = useState('');
+  const [selectedDepartments, setSelectedDepartments] = useState<string[]>([]);
+  const [availableDepartments, setAvailableDepartments] = useState<string[]>([]);
   const [customDepartment, setCustomDepartment] = useState('');
   const [useCustomDepartment, setUseCustomDepartment] = useState(false);
   const [docTypes, setDocTypes] = useState<string[]>([]);
@@ -66,7 +67,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     if (!currentUserIsAdmin) {
       const dept = currentUserDepartment || 'Global';
       setDepartments([dept]);
-      setSelectedDepartment(dept);
+      setSelectedDepartments([dept]);
       setCustomDepartment('');
       return;
     }
@@ -81,11 +82,11 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           const initial = preferred
             ? (currentUserDepartment as string)
             : list[0];
-          setSelectedDepartment(initial);
+          setSelectedDepartments([initial]);
         } else {
           const fallback = currentUserDepartment || uiText('adminUsers');
           setDepartments([fallback]);
-          setSelectedDepartment(fallback);
+          setSelectedDepartments([fallback]);
         }
         setCustomDepartment('');
         setDeptQuery('');
@@ -93,7 +94,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       .catch(() => {
         const fallback = currentUserDepartment || uiText('adminUsers');
         setDepartments([fallback]);
-        setSelectedDepartment(fallback);
+        setSelectedDepartments([fallback]);
         setCustomDepartment('');
         setDeptQuery('');
       });
@@ -144,15 +145,18 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       form.append('is_private', isPrivate ? 'true' : 'false');
       form.append('visibility', visibility);
       if (visibility === 'department') {
-        let deptToSend = '';
+        let deptsToSend: string[] = [];
         if (useCustomDepartment) {
-          deptToSend = customDepartment.trim();
+          const custom = customDepartment.trim();
+          if (custom) deptsToSend = [custom];
         } else {
-          deptToSend = selectedDepartment.trim();
+          deptsToSend = selectedDepartments.filter(d => d.trim());
         }
-        if (deptToSend) {
-          form.append('department', deptToSend);
-        }
+        // The backend expects a list, but FormData sends multiple entries for the same key.
+        // FastAPI can interpret this as a list, but sometimes it's tricky.
+        // A robust way is to send a JSON string and parse it on the backend.
+        // However, the current backend seems to expect a list from Form directly.
+        deptsToSend.forEach(dept => form.append('department', dept)); // This should work with FastAPI if the endpoint is correct.
       }
 
       let auth: string | undefined;
@@ -403,18 +407,25 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                     onChange={e => setDeptQuery(e.target.value)}
                     disabled={useCustomDepartment}
                   />
-                  <select
-                    className="w-full rounded-lg bg-slate-50 border border-slate-200 px-2 py-1 text-xs disabled:bg-slate-100 disabled:text-slate-400"
-                    value={selectedDepartment}
-                    onChange={e => setSelectedDepartment(e.target.value)}
-                    disabled={useCustomDepartment}
-                  >
+                  <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 bg-slate-50">
                     {filteredDepartments.map(dept => (
-                      <option key={dept} value={dept}>
+                      <label key={dept} className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={selectedDepartments.includes(dept)}
+                          onChange={e => {
+                            if (e.target.checked) {
+                              setSelectedDepartments(prev => [...prev, dept]);
+                            } else {
+                              setSelectedDepartments(prev => prev.filter(d => d !== dept));
+                            }
+                          }}
+                          disabled={useCustomDepartment}
+                        />
                         {dept}
-                      </option>
+                      </label>
                     ))}
-                  </select>
+                  </div>
                   <input
                     className="w-full rounded-lg bg-slate-50 border border-slate-200 px-2 py-1 text-[11px] placeholder:text-slate-400 disabled:bg-slate-100 disabled:text-slate-400"
                     placeholder={uiText('newDepartmentPlaceholder')}
@@ -425,7 +436,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 </div>
                 ) : (
                   <div className="w-full rounded-lg bg-slate-50 border border-slate-200 px-2 py-1 text-[11px] text-slate-700">
-                    {selectedDepartment || currentUserDepartment || uiText('global')}
+                    {selectedDepartments[0] || currentUserDepartment || uiText('global')}
                   </div>
                 )}
               </label>

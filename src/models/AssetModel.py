@@ -53,7 +53,10 @@ class AssetModel(BaseDataModel):
         if visibility == "global":
             return True
         if visibility == "department" and asset_dept and user_dept:
-            return asset_dept == user_dept
+            if isinstance(asset_dept, list):
+                return user_dept in asset_dept
+            elif isinstance(asset_dept, str):
+                return user_dept == asset_dept
 
         # default / private
         return False

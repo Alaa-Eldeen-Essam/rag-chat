@@ -14,7 +14,7 @@ interface Asset {
   size?: number;
   is_private?: boolean;
   visibility?: string;
-  department?: string | null;
+  department?: string[] | string | null;
   created_at?: string;
 }
 
@@ -300,7 +300,7 @@ export const AdminFilesPage: React.FC = () => {
                   </td>
                   <td className="px-3 py-2 border-b border-slate-100">
                     {a.visibility === 'department'
-                      ? `${uiText('department')}: ${a.department || '—'}`
+                      ? `${uiText('department')}: ${Array.isArray(a.department) ? a.department.join(', ') : a.department || '—'}`
                       : a.visibility === 'global'
                       ? uiText('public')
                       : uiText('private')}
