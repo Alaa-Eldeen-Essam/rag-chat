@@ -203,9 +203,6 @@ export const AdminFilesPage: React.FC = () => {
                     onChange={e => toggleSelectAll(e.target.checked)}
                   />
                 </th>
-                <th className={`px-3 py-2 border-b border-slate-200 ${isRTL ? 'text-right' : 'text-left'}`}>
-                  {uiText('id')}
-                </th>
                 <th className={`px-2 py-1 border-b border-slate-800 ${isRTL ? 'text-right' : 'text-left'}`}>
                   {uiText('name')}
                 </th>
@@ -240,46 +237,49 @@ export const AdminFilesPage: React.FC = () => {
                     />
                   </td>
                   <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
-                    <div className="max-w-xs truncate text-slate-700 font-medium">
-                      {a.asset_id}
-                    </div>
-                  </td>
-                  <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
                     <div className="max-w-xs truncate text-slate-700">
                       {a.original_name || a.name}
                     </div>
                   </td>
                   <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
                     {editingDocTypeId === a.asset_id ? (
-                      <div className="flex items-center gap-1">
+                      <div className="inline-flex flex-wrap items-center gap-2 rounded-2xl border border-[color:var(--border-subtle)] bg-white px-2 py-1 shadow-sm">
                         <input
-                          className="w-full rounded bg-slate-950 border border-slate-700 px-1 py-0.5 text-[11px]"
+                          className="w-32 rounded-full border border-transparent bg-[color:var(--bg-soft)] px-3 py-1 text-xs focus:border-[color:var(--accent)] focus:outline-none"
                           value={editingDocTypeValue}
-                          onChange={e =>
-                            setEditingDocTypeValue(e.target.value)
-                          }
+                          onChange={e => setEditingDocTypeValue(e.target.value)}
                           disabled={savingDocType}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleSaveDocType(a.asset_id);
+                            }
+                          }}
                         />
-                        <button
-                          type="button"
-                          className="text-[10px] text-theme-accent"
-                          disabled={savingDocType}
-                          onClick={() => handleSaveDocType(a.asset_id)}
-                        >
-                          {uiText('save')}
-                        </button>
-                        <button
-                          type="button"
-                          className="text-[10px] text-theme-muted"
-                          disabled={savingDocType}
-                          onClick={handleCancelEditDocType}
-                        >
-                          {uiText('cancel')}
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="btn-action px-3 py-1 text-[10px]"
+                            disabled={savingDocType}
+                            onClick={() => handleSaveDocType(a.asset_id)}
+                          >
+                            {uiText('save')}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-chip px-3 py-1 text-[10px]"
+                            disabled={savingDocType}
+                            onClick={handleCancelEditDocType}
+                          >
+                            {uiText('cancel')}
+                          </button>
+                        </div>
                       </div>
                     ) : (
-                      <div className="flex items-center justify-between gap-1">
-                        <span>{a.doc_type || '-'}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-slate-800">
+                          {a.doc_type || '-'}
+                        </span>
                         {canEditDocType(a) && (
                           <button
                             type="button"

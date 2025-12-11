@@ -993,7 +993,7 @@ async def update_asset_doc_type(
             )
             chunks = result.scalars().all()
             for ch in chunks:
-                meta = ch.chunk_metadata or {}
+                meta = dict(ch.chunk_metadata or {})
                 meta["doc_type"] = new_doc_type
                 ch.chunk_metadata = meta
 

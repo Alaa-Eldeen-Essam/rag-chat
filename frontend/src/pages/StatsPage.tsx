@@ -52,6 +52,7 @@ interface RawSystemStats {
     doc_type?: string | null;
     visibility?: string;
     department?: string | null;
+    departments?: string[];
     queries?: number;
     avg_rating?: number | null;
     fallback_rate?: number;
@@ -82,6 +83,7 @@ interface SystemStatsView {
     doc_type?: string | null;
     visibility: string;
     department?: string | null;
+    departments?: string[];
     queries: number;
     avg_rating?: number | null;
     fallback_rate?: number;
@@ -104,6 +106,21 @@ interface UsersOverviewResponse {
   users: UsersOverviewRow[];
   pagination?: { page: number; limit: number; total_users: number; total_pages: number };
 }
+
+const normalizeDepartmentsList = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[,،؛]/)
+      .map(part => part.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
 
 export const StatsPage: React.FC = () => {
   const { request } = useHttpClient();
@@ -210,16 +227,22 @@ export const StatsPage: React.FC = () => {
           : undefined;
 
         const content_risk = Array.isArray(contentRiskRaw)
-          ? contentRiskRaw.map(item => ({
-              asset_id: item.asset_id,
-              name: item.name ?? `${uiText('asset')} #${item.asset_id}`,
-              doc_type: item.doc_type ?? null,
-              visibility: item.visibility ?? 'private',
-              department: item.department ?? null,
-              queries: item.queries ?? 0,
-              avg_rating: item.avg_rating ?? null,
-              fallback_rate: item.fallback_rate ?? 0
-            }))
+          ? contentRiskRaw.map(item => {
+              const deptList = normalizeDepartmentsList(
+                item.departments ?? item.department ?? []
+              );
+              return {
+                asset_id: item.asset_id,
+                name: item.name ?? `${uiText('asset')} #${item.asset_id}`,
+                doc_type: item.doc_type ?? null,
+                visibility: item.visibility ?? 'private',
+                department: deptList[0] ?? null,
+                departments: deptList.length ? deptList : undefined,
+                queries: item.queries ?? 0,
+                avg_rating: item.avg_rating ?? null,
+                fallback_rate: item.fallback_rate ?? 0
+              };
+            })
           : undefined;
 
         const view: SystemStatsView = {
@@ -521,7 +544,36 @@ export const StatsPage: React.FC = () => {
                               <span className="text-theme-muted">{doc.visibility}</span>
                             </td>
                             <td className="px-3 py-2">
-                              <span className="text-theme-muted">{doc.department || '-'}</span>
+                              {(() => {
+                                const deptList = Array.isArray(doc.departments) && doc.departments.length
+                                  ? doc.departments
+                                  : doc.department
+                                  ? [doc.department]
+                                  : [];
+                                if (deptList.length === 0) {
+                                  return <span className="text-theme-muted">—</span>;
+                                }
+                                const pluralLabel = uiLanguage === 'ar' ? 'الأقسام' : 'Departments';
+                                return (
+                                  <div className="flex flex-col gap-2">
+                                    <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[color:var(--bg-pill)] px-3 py-0.5 text-[11px] font-semibold text-theme-strong">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--accent)]" />
+                                      {deptList.length}{' '}
+                                      {deptList.length === 1 ? uiText('department') : pluralLabel}
+                                    </span>
+                                    <div className="flex flex-wrap gap-2">
+                                      {deptList.map(item => (
+                                        <span
+                                          key={`${doc.asset_id}-${item}`}
+                                          className="inline-flex items-center rounded-full border border-[color:var(--border-subtle)] bg-white/80 px-3 py-1 text-[11px] font-medium text-theme-strong shadow-sm"
+                                        >
+                                          {item}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </td>
                             <td className="px-3 py-2 text-right">
                               <span className="text-theme-strong">{doc.queries}</span>

@@ -441,40 +441,48 @@ export const AdminUsersPage: React.FC = () => {
                 <tr key={u.id} className="odd:bg-white even:bg-slate-50/60 hover:bg-sky-50 transition">
                   <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
                     {editingUsernameId === u.id ? (
-                      <div className="flex items-center gap-1">
+                      <div className="inline-flex flex-wrap items-center gap-2 rounded-2xl border border-[color:var(--border-subtle)] bg-white px-2 py-1 shadow-sm">
                         <input
-                          className="w-28 rounded bg-slate-950 border border-slate-700 px-1 py-0.5"
+                          className="w-32 rounded-full border border-transparent bg-[color:var(--bg-soft)] px-3 py-1 text-xs focus:border-[color:var(--accent)] focus:outline-none"
                           value={editingUsernameValue}
-                          onChange={e =>
-                            setEditingUsernameValue(e.target.value)
-                          }
+                          onChange={e => setEditingUsernameValue(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') handleSaveUsername(u.id);
+                          }}
                         />
-                        <button
-                          type="button"
-                          className="text-[10px] text-theme-accent"
-                          onClick={() => handleSaveUsername(u.id)}
-                        >
-                          {uiText('save')}
-                        </button>
-                        <button
-                          type="button"
-                          className="text-[10px] text-theme-muted"
-                          onClick={() => setEditingUsernameId(null)}
-                        >
-                          {uiText('cancel')}
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="btn-action px-3 py-1 text-[10px]"
+                            onClick={() => handleSaveUsername(u.id)}
+                          >
+                            {uiText('save')}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-chip px-3 py-1 text-[10px]"
+                            onClick={() => setEditingUsernameId(null)}
+                          >
+                            {uiText('cancel')}
+                          </button>
+                        </div>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        className="text-slate-800 hover:text-sky-600"
-                        onClick={() => {
-                          setEditingUsernameId(u.id);
-                          setEditingUsernameValue(u.username);
-                        }}
-                      >
-                        {u.username}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-slate-800">
+                          {u.username}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-chip px-2 py-0.5 text-[10px]"
+                          onClick={() => {
+                            setEditingUsernameId(u.id);
+                            setEditingUsernameValue(u.username);
+                          }}
+                        >
+                          {uiText('edit')}
+                        </button>
+                      </div>
                     )}
                   </td>
                   <td className="px-3 py-2 border-b border-slate-100">
@@ -492,38 +500,49 @@ export const AdminUsersPage: React.FC = () => {
                   </td>
                   <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>
                     {editingDeptId === u.id ? (
-                      <div className="flex items-center gap-1">
+                      <div className="inline-flex flex-wrap items-center gap-2 rounded-2xl border border-[color:var(--border-subtle)] bg-white px-2 py-1 shadow-sm">
                         <input
-                          className="w-24 rounded bg-slate-950 border border-slate-700 px-1 py-0.5"
+                          className="w-28 rounded-full border border-transparent bg-[color:var(--bg-soft)] px-3 py-1 text-xs focus:border-[color:var(--accent)] focus:outline-none"
                           value={editingDeptValue}
                           onChange={e => setEditingDeptValue(e.target.value)}
+                          placeholder={uiText('department')}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') handleSaveDepartment(u.id);
+                          }}
                         />
-                        <button
-                          type="button"
-                          className="text-[10px] text-theme-accent"
-                          onClick={() => handleSaveDepartment(u.id)}
-                        >
-                          {uiText('save')}
-                        </button>
-                        <button
-                          type="button"
-                          className="text-[10px] text-theme-muted"
-                          onClick={() => setEditingDeptId(null)}
-                        >
-                          {uiText('cancel')}
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="btn-action px-3 py-1 text-[10px]"
+                            onClick={() => handleSaveDepartment(u.id)}
+                          >
+                            {uiText('save')}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-chip px-3 py-1 text-[10px]"
+                            onClick={() => setEditingDeptId(null)}
+                          >
+                            {uiText('cancel')}
+                          </button>
+                        </div>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        className="text-slate-700 hover:text-sky-600"
-                        onClick={() => {
-                          setEditingDeptId(u.id);
-                          setEditingDeptValue(u.department || '');
-                        }}
-                     >
-                        {u.department || uiText('public')}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-700">
+                          {u.department || uiText('public')}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-chip px-2 py-0.5 text-[10px]"
+                          onClick={() => {
+                            setEditingDeptId(u.id);
+                            setEditingDeptValue(u.department || '');
+                          }}
+                        >
+                          {uiText('edit')}
+                        </button>
+                      </div>
                     )}
                   </td>
                   <td className={`px-3 py-2 border-b border-slate-100 ${isRTL ? 'text-right' : 'text-left'}`}>

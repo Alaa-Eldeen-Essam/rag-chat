@@ -345,13 +345,16 @@ export const ChatPage: React.FC = () => {
       .catch(() => {
         setConversations([]);
       });
+  }, [request, setSettings]);
+
+  useEffect(() => {
     request<AssetsResponse>('/api/v1/data/assets')
       .then(res => {
         const items = Array.isArray(res.assets) ? res.assets : [];
         setSummaryAssets(items);
       })
       .catch(() => setSummaryAssets([]));
-  }, [request, setSettings]);
+  }, [request, docTypesVersion, currentDocType]);
 
   const loadHistory = async (id: number) => {
     setSelectedConversationId(id);
