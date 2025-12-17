@@ -1183,12 +1183,12 @@ export const ChatPage: React.FC = () => {
                         </div>
                       )}
                       <div className="space-y-2">
-                  <ChatMessageBubble
-                    role={m.role}
-                    content={m.content}
-                    isStreaming={isStreaming && m.role === 'assistant'}
-                    onCopy={() => {}}
-                  />
+                        <ChatMessageBubble
+                          role={m.role}
+                          content={m.content}
+                          isStreaming={isStreaming && m.role === 'assistant'}
+                          onCopy={() => {}}
+                        />
                   {!isRegularMode &&
                     m.role === 'assistant' &&
                     m.sources &&
@@ -1256,46 +1256,45 @@ export const ChatPage: React.FC = () => {
                         </div>
                       );
                     })()}
-                  {m.role === 'assistant' && (
-                    <div className="pl-4 md:pl-10 text-[11px] text-slate-500 flex gap-3">
-                      {(() => {
-                        const fb = feedbackByMessage[m.id];
-                        const helpfulActive = fb === 'helpful';
-                        const unhelpfulActive = fb === 'unhelpful';
-                        const disabled = !!fb;
-                        return (
-                          <>
-                            <button
-                              type="button"
-                              className={
-                                helpfulActive
-                                  ? 'text-emerald-500 font-semibold'
-                                  : 'hover:text-emerald-500'
-                              }
-                              disabled={disabled}
-                              onClick={() => submitFeedback(m.id, true)}
-                            >
-                              {uiText('helpful')}
-                            </button>
-                            <button
-                              type="button"
-                              className={
-                                unhelpfulActive
-                                  ? 'text-red-500 font-semibold'
-                                  : 'hover:text-red-500'
-                              }
-                              disabled={disabled}
-                              onClick={() => submitFeedback(m.id, false)}
-                            >
-                              {uiText('notHelpful')}
-                            </button>
-                          </>
-                        );
-                      })()}
-                    </div>
-                  )}
-                </div>
-                    </div>
+                        {m.role === 'assistant' && (
+                          <div className="pl-4 md:pl-10 text-[11px] text-slate-500 flex gap-3">
+                            {(() => {
+                              const fb = feedbackByMessage[m.id];
+                              const helpfulActive = fb === 'helpful';
+                              const unhelpfulActive = fb === 'unhelpful';
+                              const disabled = !!fb;
+                              return (
+                                <>
+                                  <button
+                                    type="button"
+                                    className={
+                                      helpfulActive
+                                        ? 'text-emerald-500 font-semibold'
+                                        : 'hover:text-emerald-500'
+                                    }
+                                    disabled={disabled}
+                                    onClick={() => submitFeedback(m.id, true)}
+                                  >
+                                    {uiText('helpful')}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={
+                                      unhelpfulActive
+                                        ? 'text-red-500 font-semibold'
+                                        : 'hover:text-red-500'
+                                    }
+                                    disabled={disabled}
+                                    onClick={() => submitFeedback(m.id, false)}
+                                  >
+                                    {uiText('notHelpful')}
+                                  </button>
+                                </>
+                              );
+                            })()}
+                          </div>
+                        )}
+                      </div>
                     </React.Fragment>
                   );
                 });
