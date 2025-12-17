@@ -903,6 +903,8 @@ async def answer_rag(
             return reasoning_text
         return ""
 
+    start_time = time.perf_counter()
+
     if is_regular_mode:
         history_filter = [history_mode_tag]
         general_fallback = "I'm sorry, I couldn't generate a response right now."
