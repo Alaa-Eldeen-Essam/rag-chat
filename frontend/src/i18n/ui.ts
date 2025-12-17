@@ -44,6 +44,8 @@ type Key =
   | 'source'
   | 'excerpt'
   | 'friendlyServerIssue'
+  | 'dateToday'
+  | 'dateYesterday'
   | 'promptGuardBlocked'
   // Chat
   | 'resources'
@@ -256,6 +258,8 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     friendlyServerIssue: "We're still tidying things up. Please try again shortly.",
     promptGuardBlocked: 'This request was blocked by the safety filter. Please ask directly about the documents.',
     resources: 'Resources',
+    dateToday: 'Today',
+    dateYesterday: 'Yesterday',
     allFiles: 'All files',
     filesSelected: 'files selected',
     noFilesForType: 'No files for this type.',
@@ -458,6 +462,8 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     friendlyServerIssue: 'نقوم بترتيب الأمور في الخلفية. يرجى المحاولة مرة أخرى بعد قليل.',
     promptGuardBlocked: 'تم حظر هذا الطلب من قبل الحماية. يرجى إعادة صياغته بدون محاولة تغيير تعليمات المساعد.',
     resources: 'المصادر',
+    dateToday: 'اليوم',
+    dateYesterday: 'أمس',
     allFiles: 'كل الملفات',
     filesSelected: 'ملف/ملفات محددة',
     noFilesForType: 'لا توجد ملفات لهذا النوع.',

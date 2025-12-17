@@ -703,6 +703,30 @@ export const ChatPage: React.FC = () => {
     return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  const formatDateLabel = (value?: string | null) => {
+    if (!value) return '';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '';
+    const now = new Date();
+    const startOfDay = (date: Date) => {
+      return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    };
+    const diffMs = startOfDay(now).getTime() - startOfDay(parsed).getTime();
+    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+    if (diffDays === 0) return uiText('dateToday');
+    if (diffDays === 1) return uiText('dateYesterday');
+    if (diffDays > 1 && diffDays <= 6) {
+      return parsed.toLocaleDateString(uiLanguage === 'ar' ? 'ar' : undefined, {
+        weekday: 'long'
+      });
+    }
+    return parsed.toLocaleDateString(uiLanguage === 'ar' ? 'ar' : undefined, {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric'
+    });
+  };
+
   useEffect(() => {
     request<{ doc_types?: string[] }>('/api/v1/nlp/doc-types')
       .then(res => {
@@ -1143,8 +1167,22 @@ export const ChatPage: React.FC = () => {
                   </div>
                 </div>
               )}
-              {messages.map(m => (
-                <div key={m.id} className="space-y-2">
+              {(() => {
+                let lastDate = '';
+                return messages.map(m => {
+                  const dateLabel = m.timestamp ? formatDateLabel(m.timestamp) : '';
+                  const showDate = !!dateLabel && dateLabel !== lastDate;
+                  if (showDate) lastDate = dateLabel;
+                  return (
+                    <React.Fragment key={m.id}>
+                      {showDate && (
+                        <div className="flex justify-center py-2">
+                          <span className="px-4 py-1 rounded-full bg-[color:var(--bg-soft)] text-[11px] text-slate-600 border border-[color:var(--border-subtle)]">
+                            {dateLabel}
+                          </span>
+                        </div>
+                      )}
+                      <div className="space-y-2">
                   <ChatMessageBubble
                     role={m.role}
                     content={m.content}
@@ -1257,7 +1295,11 @@ export const ChatPage: React.FC = () => {
                     </div>
                   )}
                 </div>
-              ))}
+                    </div>
+                    </React.Fragment>
+                  );
+                });
+              })()}
             </div>
             <div className="border-t border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-5 py-4">
               <form
