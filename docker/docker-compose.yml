@@ -34,6 +34,15 @@ services:
       - "11434:11434"
     volumes:
       - ollama_chat_data:/root/.ollama
+      - ./ollama:/modelfiles
+    command: >
+      /bin/sh -c "
+        ollama serve &
+        OL_PID=$$!
+        sleep 5 &&
+        ollama create qwen-32k -f /modelfiles/qwen-32k.Modelfile || true &&
+        wait $$OL_PID
+      "
     networks:
       - backend
     restart: always
