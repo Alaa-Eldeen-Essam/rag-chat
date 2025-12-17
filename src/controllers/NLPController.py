@@ -1074,10 +1074,10 @@ class NLPController(BaseController):
                 collector=collector
             )
         else:
-        answer_or_stream = self.generation_client.generate_text(
-            prompt=full_prompt,
-            chat_history=chat_history
-        )
+            answer_or_stream = self.generation_client.generate_text(
+                prompt=full_prompt,
+                chat_history=chat_history
+            )
 
         return answer_or_stream, full_prompt, chat_history
 
