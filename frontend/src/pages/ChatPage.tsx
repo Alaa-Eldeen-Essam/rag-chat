@@ -79,7 +79,7 @@ export const ChatPage: React.FC = () => {
   } = useSettings();
   const { request } = useHttpClient();
   const { streamFetch } = useStreamClient();
-  const CONVERSATIONS_PER_PAGE = 9;
+  const CONVERSATIONS_PER_PAGE = 5;
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] =
