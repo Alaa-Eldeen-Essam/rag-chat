@@ -1074,12 +1074,71 @@ class NLPController(BaseController):
                 collector=collector
             )
         else:
-            answer_or_stream = self.generation_client.generate_text(
-                prompt=full_prompt,
-                chat_history=chat_history
-            )
+        answer_or_stream = self.generation_client.generate_text(
+            prompt=full_prompt,
+            chat_history=chat_history
+        )
 
         return answer_or_stream, full_prompt, chat_history
+
+    async def generate_regular_chat_response(
+        self,
+        query: str,
+        chat_messages: Optional[List[Dict[str, str]]] = None,
+        stream: bool = False,
+        collector: Optional[dict] = None,
+    ):
+        """
+        Generate a general (non-RAG) chat response that still respects the
+        locale-specific system instructions but does not include any document
+        evidence. This path is used for the Regular Chat Mode.
+        """
+        system_prompt = self.template_parser.get("chat", "system_prompt") or (
+            "You are a concise, policy-compliant assistant. "
+            "Answer helpfully, stay polite, and decline any unsafe requests."
+        )
+
+        chat_history = [
+            self.generation_client.construct_prompt(
+                prompt=system_prompt,
+                role=self.generation_client.enums.SYSTEM.value,
+            )
+        ]
+
+        if chat_messages:
+            trimmed_messages = chat_messages[-8:]
+            for message in trimmed_messages:
+                prompt_text = self.generation_client.process_text(message.get("prompt", ""))
+                answer_text = self.generation_client.process_text(message.get("answer", ""))
+                if prompt_text:
+                    chat_history.append(
+                        self.generation_client.construct_prompt(
+                            prompt=prompt_text,
+                            role=self.generation_client.enums.USER.value,
+                        )
+                    )
+                if answer_text:
+                    chat_history.append(
+                        self.generation_client.construct_prompt(
+                            prompt=answer_text,
+                            role=self.generation_client.enums.ASSISTANT.value,
+                        )
+                    )
+
+        final_prompt = self.generation_client.process_text(query or "")
+        if stream:
+            answer_stream = self.generation_client.generate_text_stream(
+                prompt=final_prompt,
+                chat_history=chat_history,
+                collector=collector,
+            )
+            return answer_stream, final_prompt, chat_history
+
+        answer = self.generation_client.generate_text(
+            prompt=final_prompt,
+            chat_history=chat_history,
+        )
+        return answer, final_prompt, chat_history
     
     def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
                          max_output_tokens: Optional[int] = None,

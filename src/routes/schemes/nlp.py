@@ -14,6 +14,7 @@ class SearchRequest(BaseModel):
     asset_id: Optional[int] = None
     asset_ids: Optional[List[int]] = None
     doc_type: Optional[str] = None
+    mode: Optional[str] = "rag"
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None

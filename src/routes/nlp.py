@@ -627,36 +627,11 @@ async def answer_rag(
     # Project access check removed
     project = SimpleNamespace(project_id=project_id)
 
-    asset_model = await AssetModel.create_instance(
-        db_client=request.app.db_client
-    )
-
-    # Collect all accessible assets across projects (own + public, or all for admins)
-    all_assets = await asset_model.get_all_accessible_assets(
-        asset_type=AssetTypeEnum.FILE.value,
-        current_user=current_user,
-    )
-    asset_label_lookup = {}
-    asset_label_lookup_by_name = {}
-    accessible_asset_ids = set()
-    assets_by_project_id = {}
+    asset_label_lookup: Dict[int, str] = {}
+    asset_label_lookup_by_name: Dict[str, str] = {}
+    accessible_asset_ids: set[int] = set()
+    assets_by_project_id: dict[int, list[Asset]] = {}
     asset_to_project: dict[int, int] = {}
-    for asset in all_assets:
-        display_name = get_asset_display_name(asset) or asset.asset_name
-        asset_label_lookup[asset.asset_id] = display_name
-        asset_label_lookup_by_name[asset.asset_name] = display_name
-        accessible_asset_ids.add(asset.asset_id)
-        assets_by_project_id.setdefault(asset.asset_project_id, []).append(asset)
-        asset_to_project[asset.asset_id] = asset.asset_project_id
-
-    if not accessible_asset_ids:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "signal": ResponseSignal.NO_FILES_ERROR.value,
-                "detail": "No accessible files are available for search.",
-            },
-        )
 
     generation_clients = getattr(request.app, "generation_clients", {})
     generation_models = getattr(request.app, "generation_model_ids", {})
@@ -676,6 +651,45 @@ async def answer_rag(
         language=template_language,
         default_language=app_settings.DEFAULT_LANG or "en",
     )
+
+    requested_mode = (search_request.mode or "rag").strip().lower()
+    if requested_mode not in {"rag", "regular"}:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "detail": "Unsupported chat mode requested."
+            }
+        )
+    is_regular_mode = requested_mode == "regular"
+    history_mode_tag = f"mode:{requested_mode}"
+
+    asset_model = None
+    if not is_regular_mode:
+        asset_model = await AssetModel.create_instance(
+            db_client=request.app.db_client
+        )
+        # Collect all accessible assets across projects (own + public, or all for admins)
+        all_assets = await asset_model.get_all_accessible_assets(
+            asset_type=AssetTypeEnum.FILE.value,
+            current_user=current_user,
+        )
+        for asset in all_assets:
+            display_name = get_asset_display_name(asset) or asset.asset_name
+            asset_label_lookup[asset.asset_id] = display_name
+            asset_label_lookup_by_name[asset.asset_name] = display_name
+            accessible_asset_ids.add(asset.asset_id)
+            assets_by_project_id.setdefault(asset.asset_project_id, []).append(asset)
+            asset_to_project[asset.asset_id] = asset.asset_project_id
+
+        if not accessible_asset_ids:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.NO_FILES_ERROR.value,
+                    "detail": "No accessible files are available for search.",
+                },
+            )
 
     nlp_controller = NLPController(
         vectordb_client=request.app.vectordb_client,
@@ -715,18 +729,20 @@ async def answer_rag(
         )
 
     explicit_doc_type = (search_request.doc_type or "").strip().lower() if hasattr(search_request, "doc_type") else ""
-    if not explicit_doc_type or explicit_doc_type == "all":
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "signal": ResponseSignal.VECTORDB_SEARCH_ERROR.value,
-                "detail": "You must select a document type before asking questions.",
-            },
-        )
-    doc_type_filter = [explicit_doc_type]
-    asset_filter = search_request.asset_id
+    doc_type_filter: List[str] = []
+    if not is_regular_mode:
+        if not explicit_doc_type or explicit_doc_type == "all":
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.VECTORDB_SEARCH_ERROR.value,
+                    "detail": "You must select a document type before asking questions.",
+                },
+            )
+        doc_type_filter = [explicit_doc_type]
+    asset_filter = None if is_regular_mode else search_request.asset_id
     asset_filters: Optional[List[int]] = None
-    if getattr(search_request, "asset_ids", None):
+    if not is_regular_mode and getattr(search_request, "asset_ids", None):
         try:
             asset_filters = [
                 int(aid)
@@ -747,16 +763,58 @@ async def answer_rag(
         limit=5
     )
 
-    # Build chat history for the LLM, but only reuse turns that are
-    # compatible with the current doc_type / file filters. This keeps
-    # follow-ups on the same scope rich, while avoiding leaking context
-    # from questions asked under different document types or files.
+    def _normalize_doc_types(raw_values: Optional[List[Any]]) -> List[str]:
+        values: List[str] = []
+        if not raw_values:
+            return values
+        for value in raw_values:
+            try:
+                lowered = str(value).strip().lower()
+            except Exception:
+                continue
+            if lowered:
+                values.append(lowered)
+        return values
+
+    def _infer_record_mode(lowered_types: List[str]) -> Optional[str]:
+        for value in lowered_types:
+            if value.startswith("mode:"):
+                return value.split(":", 1)[1] or None
+        if lowered_types:
+            return "rag"
+        return None
+
+    conversation_mode: Optional[str] = None
+    for record in reversed(recent_history):
+        lowered_types = _normalize_doc_types(getattr(record, "doc_types", None))
+        inferred_mode = _infer_record_mode(lowered_types)
+        if inferred_mode:
+            conversation_mode = inferred_mode
+            break
+
+    if conversation_mode and conversation_mode != requested_mode:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "detail": "This conversation was started in a different mode. Start a new chat to switch modes.",
+            },
+        )
+
+    # Build chat history for the LLM with mode-aware filtering.
     chat_messages = []
     last_user_question: Optional[str] = None
     for record in recent_history:
-        record_doc_types = getattr(record, "doc_types", None) or []
-        # If no filters are active, reuse all history.
-        if not explicit_doc_type and asset_filter is None:
+        lowered_types_list = _normalize_doc_types(getattr(record, "doc_types", None))
+        lowered_types = set(lowered_types_list)
+        record_mode = _infer_record_mode(lowered_types_list)
+        if record_mode is None and is_regular_mode:
+            # Treat legacy records without an explicit mode tag as RAG-only data.
+            continue
+        if record_mode and record_mode != requested_mode:
+            continue
+
+        if is_regular_mode:
             chat_messages.append(
                 {
                     "prompt": record.prompt,
@@ -767,21 +825,16 @@ async def answer_rag(
                 last_user_question = record.prompt
             continue
 
+        # For RAG mode, also enforce doc_type / asset filters.
         compatible = True
 
-        # DocType compatibility: if an explicit doc_type is set now, only
-        # reuse history that was created under the same doc_type, or under
-        # the generic "all" scope.
         if explicit_doc_type:
-            lowered_record_types = {str(dt).strip().lower() for dt in record_doc_types}
-            if "all" not in lowered_record_types and explicit_doc_type not in lowered_record_types:
+            if "all" not in lowered_types and explicit_doc_type not in lowered_types:
                 compatible = False
 
-        # Asset/file compatibility: if a file filter is active, only reuse
-        # history entries that were associated with the same asset.
         if compatible and asset_filter is not None:
             tag = f"asset:{asset_filter}"
-            if tag not in record_doc_types:
+            if tag not in lowered_types:
                 compatible = False
 
         if compatible:
@@ -795,6 +848,123 @@ async def answer_rag(
                 last_user_question = record.prompt
 
     collector = {"output": [], "reasoning": []} if search_request.stream else None
+
+    def compose_collector_output(store: Optional[dict]) -> str:
+        if not store:
+            return ""
+        output_text = "".join(store.get("output", [])) if isinstance(store.get("output"), list) else ""
+        reasoning_text = "".join(store.get("reasoning", [])) if isinstance(store.get("reasoning"), list) else ""
+        output_text = output_text.strip()
+        reasoning_text = reasoning_text.strip()
+        if output_text and reasoning_text:
+            return f"{output_text}\n\nReasoning:\n{reasoning_text}"
+        if output_text:
+            return output_text
+        if reasoning_text:
+            return reasoning_text
+        return ""
+
+    if is_regular_mode:
+        history_filter = [history_mode_tag]
+        general_fallback = "I'm sorry, I couldn't generate a response right now."
+        answer_sources: List[Dict[str, str]] = []
+
+        answer_result, full_prompt, chat_history = await nlp_controller.generate_regular_chat_response(
+            query=search_request.text,
+            chat_messages=chat_messages,
+            stream=bool(search_request.stream),
+            collector=collector,
+        )
+
+        if search_request.stream:
+            async def event_stream_regular():
+                yield json.dumps({
+                    "signal": ResponseSignal.RAG_ANSWER_STREAM_START.value,
+                    "conversation_id": conversation.conversation_id,
+                    "conversation_title": conversation.conversation_title,
+                    "model": model_key_used,
+                    "model_id": generation_models.get(model_key_used),
+                }) + "\n"
+
+                try:
+                    if answer_result:
+                        for chunk in answer_result:
+                            if chunk:
+                                yield json.dumps({
+                                    "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
+                                    "delta": chunk,
+                                }) + "\n"
+                finally:
+                    final_answer = compose_collector_output(collector)
+                    if not final_answer:
+                        final_answer = general_fallback
+
+                    response_time_ms = int((time.perf_counter() - start_time) * 1000)
+                    history_record = await chat_history_model.create_history(
+                        user_id=current_user.id,
+                        conversation_id=conversation.conversation_id,
+                        prompt=search_request.text,
+                        answer=final_answer,
+                        model_key=model_key_used,
+                        doc_types=history_filter,
+                        response_time_ms=response_time_ms,
+                        fallback_used=False,
+                        resources=answer_sources or None,
+                    )
+                    await conversation_model.touch_conversation(conversation.conversation_id)
+
+                    payload = {
+                        "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
+                        "answer": final_answer,
+                        "full_prompt": full_prompt,
+                        "chat_history": chat_history,
+                        "conversation_id": conversation.conversation_id,
+                        "conversation_title": conversation.conversation_title,
+                        "document_types": history_filter,
+                        "model": model_key_used,
+                        "model_id": generation_models.get(model_key_used),
+                        "asset_id": None,
+                        "message_id": history_record.id,
+                        "sources": answer_sources,
+                    }
+                    yield json.dumps(payload) + "\n"
+
+            return StreamingResponse(event_stream_regular(), media_type="application/json")
+
+        final_answer = answer_result.strip() if isinstance(answer_result, str) else ""
+        if not final_answer:
+            final_answer = general_fallback
+
+        response_time_ms = int((time.perf_counter() - start_time) * 1000)
+        history_record = await chat_history_model.create_history(
+            user_id=current_user.id,
+            conversation_id=conversation.conversation_id,
+            prompt=search_request.text,
+            answer=final_answer,
+            model_key=model_key_used,
+            doc_types=history_filter,
+            response_time_ms=response_time_ms,
+            fallback_used=False,
+            resources=answer_sources or None,
+        )
+        await conversation_model.touch_conversation(conversation.conversation_id)
+
+        return JSONResponse(
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
+                "answer": final_answer,
+                "full_prompt": full_prompt,
+                "chat_history": chat_history,
+                "conversation_id": conversation.conversation_id,
+                "conversation_title": conversation.conversation_title,
+                "document_types": history_filter,
+                "model": model_key_used,
+                "model_id": generation_models.get(model_key_used),
+                "asset_id": None,
+                "message_id": history_record.id,
+                "sources": answer_sources,
+            }
+        )
 
     # Simple keyword extraction from the query for lexical re-ranking
     query_text = search_request.text or ""
@@ -848,39 +1018,38 @@ async def answer_rag(
         except Exception as exc:
             logger.error("Follow-up similarity check failed: %s", exc)
 
-    # Ensure requested asset filter(s) are within the user's accessible scope
-    if asset_filters:
-        invalid_ids = [aid for aid in asset_filters if aid not in accessible_asset_ids]
-        if invalid_ids:
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={
-                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
-                    "detail": "You do not have access to one or more requested files.",
-                },
-            )
-    elif asset_filter is not None:
-        try:
-            asset_filter_int = int(asset_filter)
-        except (TypeError, ValueError):
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "signal": ResponseSignal.FILE_ID_ERROR.value,
-                    "detail": "Invalid asset_id filter.",
-                },
-            )
+    # Ensure requested asset filter(s) are within the user's accessible scope (RAG mode only)
+    if not is_regular_mode:
+        if asset_filters:
+            invalid_ids = [aid for aid in asset_filters if aid not in accessible_asset_ids]
+            if invalid_ids:
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={
+                        "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                        "detail": "You do not have access to one or more requested files.",
+                    },
+                )
+        elif asset_filter is not None:
+            try:
+                asset_filter_int = int(asset_filter)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "signal": ResponseSignal.FILE_ID_ERROR.value,
+                        "detail": "Invalid asset_id filter.",
+                    },
+                )
 
-        if asset_filter_int not in accessible_asset_ids:
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={
-                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
-                    "detail": "You do not have access to the requested file.",
-                },
-            )
-    start_time = time.perf_counter()
-
+            if asset_filter_int not in accessible_asset_ids:
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={
+                        "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                        "detail": "You do not have access to the requested file.",
+                    },
+                )
     # Build project -> asset_ids mapping for search
     asset_ids_by_project: dict[int, list[int]] = {}
     if asset_filters:
@@ -1109,21 +1278,6 @@ async def answer_rag(
 
     answer_sources = build_sources()
 
-    def compose_final_answer(store: dict) -> str:
-        output_text = "".join(store.get("output", [])) if store else ""
-        reasoning_text = "".join(store.get("reasoning", [])) if store else ""
-
-        output_text = output_text.strip()
-        reasoning_text = reasoning_text.strip()
-
-        if output_text and reasoning_text:
-            return f"{output_text}\n\nReasoning:\n{reasoning_text}"
-        if output_text:
-            return output_text
-        if reasoning_text:
-            return reasoning_text
-        return ""
-
     def looks_like_refusal(text: str) -> bool:
         if not text:
             return False
@@ -1155,6 +1309,7 @@ async def answer_rag(
     history_filter = doc_type_filter.copy() if doc_type_filter else []
     if asset_filter is not None:
         history_filter.append(f"asset:{asset_filter}")
+    history_filter.append(history_mode_tag)
 
     fallback_answer = (
         "I don't have enough information in your indexed documents to answer this question."
@@ -1184,7 +1339,7 @@ async def answer_rag(
                     prompt=search_request.text,
                     answer=fallback_answer,
                     model_key=model_key_used,
-                    doc_types=history_filter or ["all"],
+                    doc_types=history_filter or ["all", history_mode_tag],
                     response_time_ms=response_time_ms,
                     fallback_used=True,
                     retrieved_chunks=retrieved_chunks_count,
@@ -1206,7 +1361,7 @@ async def answer_rag(
                     "chat_history": [],
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
-                    "document_types": history_filter or ["all"],
+                    "document_types": history_filter or ["all", history_mode_tag],
                     "model": model_key_used,
                     "model_id": generation_models.get(model_key_used),
                     "asset_id": asset_filter,
@@ -1232,7 +1387,7 @@ async def answer_rag(
                             "delta": chunk,
                         }) + "\n"
             finally:
-                final_answer = compose_final_answer(collector)
+                final_answer = compose_collector_output(collector)
 
                 # If we extracted a direct hint for a "why / لماذا" question
                 # but the model still produced a refusal-style answer, prefer
@@ -1267,7 +1422,7 @@ async def answer_rag(
                         prompt=search_request.text,
                         answer=final_answer,
                         model_key=model_key_used,
-                        doc_types=history_filter or ["all"],
+                        doc_types=history_filter or ["all", history_mode_tag],
                         response_time_ms=response_time_ms,
                         fallback_used=False,
                         retrieved_chunks=retrieved_chunks_count,
@@ -1289,7 +1444,7 @@ async def answer_rag(
                     "chat_history": chat_history,
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
-                    "document_types": history_filter or ["all"],
+                    "document_types": history_filter or ["all", history_mode_tag],
                     "model": model_key_used,
                     "model_id": generation_models.get(model_key_used),
                     "asset_id": asset_filter,
@@ -1308,7 +1463,7 @@ async def answer_rag(
             prompt=search_request.text,
             answer=fallback_answer,
             model_key=model_key_used,
-            doc_types=history_filter or ["all"],
+            doc_types=history_filter or ["all", history_mode_tag],
             response_time_ms=response_time_ms,
             fallback_used=True,
             retrieved_chunks=retrieved_chunks_count,
@@ -1331,7 +1486,7 @@ async def answer_rag(
                 "chat_history": [],
                 "conversation_id": conversation.conversation_id,
                 "conversation_title": conversation.conversation_title,
-                "document_types": history_filter or ["all"],
+                "document_types": history_filter or ["all", history_mode_tag],
                 "model": model_key_used,
                 "model_id": generation_models.get(model_key_used),
                 "asset_id": asset_filter,
@@ -1403,7 +1558,7 @@ async def answer_rag(
         prompt=search_request.text,
         answer=answer,
         model_key=model_key_used,
-        doc_types=history_filter or ["all"],
+        doc_types=history_filter or ["all", history_mode_tag],
         response_time_ms=response_time_ms,
         fallback_used=False,
         retrieved_chunks=retrieved_chunks_count,
@@ -1426,7 +1581,7 @@ async def answer_rag(
             "chat_history": chat_history,
             "conversation_id": conversation.conversation_id,
             "conversation_title": conversation.conversation_title,
-            "document_types": history_filter or ["all"],
+            "document_types": history_filter or ["all", history_mode_tag],
             "model": model_key_used,
             "model_id": generation_models.get(model_key_used),
             "asset_id": asset_filter,

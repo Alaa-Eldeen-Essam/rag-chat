@@ -69,8 +69,14 @@ interface AssetsResponse {
   assets?: AssetSummaryOption[];
 }
 export const ChatPage: React.FC = () => {
-  const { defaultProjectId, currentDocType, uiLanguage, docTypesVersion, setSettings } =
-    useSettings();
+  const {
+    defaultProjectId,
+    currentDocType,
+    chatMode,
+    uiLanguage,
+    docTypesVersion,
+    setSettings
+  } = useSettings();
   const { request } = useHttpClient();
   const { streamFetch } = useStreamClient();
   const CONVERSATIONS_PER_PAGE = 9;
@@ -117,6 +123,13 @@ export const ChatPage: React.FC = () => {
   const [conversationPage, setConversationPage] = useState(1);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [docTypeError, setDocTypeError] = useState<string | null>(null);
+  const MODE_INFO_KEY = 'chat_regular_mode_info_shown';
+  const [hasSeenRegularInfo, setHasSeenRegularInfo] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(MODE_INFO_KEY) === '1';
+  });
+  const [showRegularInfoBanner, setShowRegularInfoBanner] = useState(false);
+  const isRegularMode = chatMode === 'regular';
   const uiText = (key: Parameters<typeof t>[1]) => t(uiLanguage, key);
   const isRTL = uiLanguage === 'ar';
 
@@ -192,12 +205,13 @@ export const ChatPage: React.FC = () => {
   }, [docTypes, summaryAssets]);
 
   const chatAssetsForCurrentDocType = useMemo(() => {
+    if (chatMode === 'regular') return [];
     if (!currentDocType || currentDocType.trim() === '') return [];
     const dt = currentDocType.trim().toLowerCase();
     return summaryAssets.filter(
       a => (a.doc_type || '').trim().toLowerCase() === dt
     );
-  }, [summaryAssets, currentDocType]);
+  }, [summaryAssets, currentDocType, chatMode]);
 
   const [fileDropdownOpen, setFileDropdownOpen] = useState(false);
   const [fileDropdownQuery, setFileDropdownQuery] = useState('');
@@ -356,6 +370,15 @@ export const ChatPage: React.FC = () => {
       .catch(() => setSummaryAssets([]));
   }, [request, docTypesVersion, currentDocType]);
 
+  useEffect(() => {
+    if (isRegularMode && !hasSeenRegularInfo) {
+      setShowRegularInfoBanner(true);
+    }
+    if (!isRegularMode) {
+      setShowRegularInfoBanner(false);
+    }
+  }, [isRegularMode, hasSeenRegularInfo]);
+
   const loadHistory = async (id: number) => {
     setSelectedConversationId(id);
     try {
@@ -444,9 +467,42 @@ export const ChatPage: React.FC = () => {
     }));
   };
 
+  const handleModeChange = (nextMode: 'rag' | 'regular') => {
+    if (nextMode === chatMode) return;
+    if (isStreaming) {
+      setIsStreaming(false);
+    }
+    setMessages([]);
+    setSelectedConversationId(null);
+    setOpenResourcePanel(null);
+    setExpandedResourcesByMessage({});
+    setAssetFilterIds([]);
+    setFileDropdownQuery('');
+    setDocTypeError(null);
+    setUploadMessage(null);
+    setShowSummary(false);
+    setSummaryAssetId(null);
+    setSummaryText('');
+    setSettings(prev => ({
+      ...prev,
+      chatMode: nextMode
+    }));
+    if (nextMode === 'regular' && !hasSeenRegularInfo) {
+      setHasSeenRegularInfo(true);
+      setShowRegularInfoBanner(true);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(MODE_INFO_KEY, '1');
+      }
+    } else {
+      setShowRegularInfoBanner(false);
+    }
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isStreaming) return;
-    if (!currentDocType || currentDocType.trim() === '') {
+    const modeForRequest = chatMode;
+    const sendingRegular = modeForRequest === 'regular';
+    if (!sendingRegular && (!currentDocType || currentDocType.trim() === '')) {
       setDocTypeError(uiText('selectDocTypeFirst'));
       return;
     }
@@ -465,22 +521,26 @@ export const ChatPage: React.FC = () => {
 
     let assistantId = `assistant-${Date.now()}`;
 
+    const requestBody: Record<string, any> = {
+      text: userText,
+      limit: 20,
+      model: 'best',
+      conversation_id: selectedConversationId ?? undefined,
+      stream: true,
+      mode: modeForRequest
+    };
+    if (!sendingRegular) {
+      requestBody.doc_type = currentDocType;
+      if (assetFilterIds && assetFilterIds.length > 0) {
+        requestBody.asset_ids = assetFilterIds;
+      }
+    }
+
     await streamFetch(
       `/api/v1/nlp/index/answer/${defaultProjectId}`,
       {
         method: 'POST',
-        body: JSON.stringify({
-          text: userText,
-          limit: 20,
-          model: 'best',
-          asset_ids:
-            assetFilterIds && assetFilterIds.length > 0
-              ? assetFilterIds
-              : undefined,
-          conversation_id: selectedConversationId ?? undefined,
-          doc_type: currentDocType,
-          stream: true
-        })
+        body: JSON.stringify(requestBody)
       },
   {
     onStart: () => {
@@ -529,7 +589,7 @@ export const ChatPage: React.FC = () => {
               )
             );
           }
-          if (final && Array.isArray(final.sources)) {
+          if (!sendingRegular && final && Array.isArray(final.sources)) {
             // If we can't find the assistant message by id (id may have
             // changed during streaming), fall back to the last assistant
             // message in the list to ensure sources render.
@@ -631,7 +691,7 @@ export const ChatPage: React.FC = () => {
   }, [request, docTypesVersion]);
 
   const activeResourcePanel = useMemo(() => {
-    if (!openResourcePanel) return null;
+    if (!openResourcePanel || isRegularMode) return null;
     const msg = messages.find(m => m.id === openResourcePanel.messageId);
     if (!msg || !msg.sources) return null;
     const grouped = groupSourcesByFile(msg.sources || []);
@@ -639,7 +699,7 @@ export const ChatPage: React.FC = () => {
       grouped.find(g => g.key === openResourcePanel.fileKey) || grouped[0];
     if (!group) return null;
     return { group, messageId: msg.id };
-  }, [groupSourcesByFile, messages, openResourcePanel]);
+  }, [groupSourcesByFile, messages, openResourcePanel, isRegularMode]);
 
   return (
     <>
@@ -852,42 +912,87 @@ export const ChatPage: React.FC = () => {
       </Sidebar>
       <section className="flex-1 flex flex-col gap-3 min-h-full">
         <div className="app-card-soft px-5 py-4 rounded-3xl flex flex-col gap-2">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-[color:var(--text-surface)]">
-                  {uiText('chat')}
-                </div>
-                <div className="text-xs text-slate-500 flex items-center gap-2">
-                  <span>{uiText('docType')}:</span>
-                  <select
-                    className="rounded-full border border-[color:var(--border-subtle)] bg-white px-3 py-1 text-[12px] text-slate-700"
-                    value={currentDocType}
-                    onChange={e =>
-                      setSettings(prev => ({
-                        ...prev,
-                        currentDocType: e.target.value
-                      }))
-                    }
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-col gap-1">
+              <div className="text-sm font-semibold text-[color:var(--text-surface)]">
+                {uiText('chat')}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span>{uiLanguage === 'ar' ? 'الوضع' : 'Mode'}:</span>
+                <div className="inline-flex items-center rounded-full border border-[color:var(--border-subtle)] bg-white p-1">
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange('rag')}
+                    className={`px-3 py-1 text-[11px] rounded-full ${
+                      !isRegularMode
+                        ? 'bg-[color:var(--accent)] text-white shadow'
+                        : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
+                    }`}
                   >
-                    {filteredDocTypes.map(dt => (
-                      <option key={dt} value={dt}>
-                        {dt}
-                      </option>
-                    ))}
-                  </select>
+                    {uiLanguage === 'ar' ? 'وضع RAG' : 'RAG mode'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange('regular')}
+                    className={`px-3 py-1 text-[11px] rounded-full ${
+                      isRegularMode
+                        ? 'bg-[color:var(--accent)] text-white shadow'
+                        : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
+                    }`}
+                  >
+                    {uiLanguage === 'ar' ? 'دردشة عادية' : 'Regular chat'}
+                  </button>
                 </div>
               </div>
+            </div>
+            {!isRegularMode && (
+              <div className="flex flex-col gap-1 text-xs text-slate-500">
+                <span>{uiText('docType')}:</span>
+                <select
+                  className="rounded-full border border-[color:var(--border-subtle)] bg-white px-3 py-1 text-[12px] text-slate-700"
+                  value={currentDocType}
+                  onChange={e =>
+                    setSettings(prev => ({
+                      ...prev,
+                      currentDocType: e.target.value
+                    }))
+                  }
+                >
+                  {filteredDocTypes.map(dt => (
+                    <option key={dt} value={dt}>
+                      {dt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setShowSummary(prev => !prev)}
-                className="rounded-full px-3 py-2 text-[11px] border border-[color:var(--border-subtle)] bg-white hover:border-[color:var(--accent)]"
+                onClick={() => {
+                  if (isRegularMode) return;
+                  setShowSummary(prev => !prev);
+                }}
+                disabled={isRegularMode}
+                className={`rounded-full px-3 py-2 text-[11px] border border-[color:var(--border-subtle)] ${
+                  isRegularMode
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                    : 'bg-white text-slate-700 hover:border-[color:var(--accent)]'
+                }`}
               >
                 {showSummary ? uiText('hideSummary') : uiText('showSummary')}
               </button>
             </div>
           </div>
-          <div className={`relative flex flex-wrap items-center gap-3 ${isRTL ? 'flex-row-reverse' : ''}`}>
+          {showRegularInfoBanner && isRegularMode && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-[11px] text-amber-800">
+              {uiLanguage === 'ar'
+                ? 'وضع الدردشة العادية يستخدم نموذجاً عاماً ولا يمكنه الوصول إلى المستندات.'
+                : 'Regular chat uses a general AI model and cannot access your documents.'}
+            </div>
+          )}
+          {!isRegularMode && (
+            <div className={`relative flex flex-wrap items-center gap-3 ${isRTL ? 'flex-row-reverse' : ''}`}>
             <button
               type="button"
               className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-subtle)] bg-white px-4 py-2 text-[12px] text-slate-700 hover:border-[color:var(--accent)]"
@@ -987,6 +1092,7 @@ export const ChatPage: React.FC = () => {
               </div>
             )}
           </div>
+          )}
         </div>
         <div className="flex-1 flex flex-col lg:flex-row gap-4">
           <div className="flex-1 app-card bg-white flex flex-col rounded-3xl overflow-hidden">
@@ -1011,7 +1117,8 @@ export const ChatPage: React.FC = () => {
                     isStreaming={isStreaming && m.role === 'assistant'}
                     onCopy={() => {}}
                   />
-                  {m.role === 'assistant' &&
+                  {!isRegularMode &&
+                    m.role === 'assistant' &&
                     m.sources &&
                     m.sources.length > 0 && (() => {
                       const grouped = groupSourcesByFile(m.sources || []);
