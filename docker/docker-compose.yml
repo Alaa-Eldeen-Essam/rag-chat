@@ -203,6 +203,22 @@ services:
       retries: 5
       start_period: 10s
 
+  # pgAdmin - visual interface for PostgreSQL
+  pgadmin:
+    image: dpage/pgadmin4:8.10
+    container_name: pgadmin
+    ports:
+      - "${PGADMIN_PORT:-8081}:80"
+    env_file:
+      - ./env/.env.pgadmin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - pgvector
+    networks:
+      - backend
+    restart: always
+
   # Postgres metrics exporter
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.17.1
@@ -229,3 +245,4 @@ volumes:
   ollama_reranker_data:
   elasticsearch_data:
   vllm_models:
+  pgadmin_data:

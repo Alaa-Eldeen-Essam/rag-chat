@@ -14,6 +14,9 @@ This directory contains the Docker setup for the MiniRAG application, including 
 - **PostgreSQL + pgvector (`pgvector`)**  
   Primary relational database and vector store for embeddings.
 
+- **pgAdmin (`pgadmin`)**  
+  Web UI for browsing the Postgres database. Published on `http://localhost:8081` by default (configurable via `PGADMIN_PORT`).
+
 - **Postgres Exporter (`postgres-exporter`)**  
   Exposes Postgres metrics for Prometheus-compatible setups (not bundled here by default).
 
@@ -55,6 +58,7 @@ Inside `docker/env`:
 cd docker/env
 cp .env.example.postgres .env.postgres
 cp .env.example.postgres-exporter .env.postgres-exporter
+cp .env.example.pgadmin .env.pgadmin
 ```
 
 Set passwords / DB names as needed to match `.env.app`.
@@ -108,6 +112,9 @@ docker compose down -v --remove-orphans
 
 - FastAPI docs (proxied via Nginx):  
   `http://localhost/docs`
+
+- pgAdmin:  
+  `http://localhost:8081` (use the email/password from `.env.pgadmin`, then register a new server pointing to host `pgvector`, port `5432`, and the credentials from `.env.postgres`).
 
 > Elasticsearch, Ollama Embed, and vLLM are only exposed inside the Docker network and are intended to be accessed via the FastAPI API, not directly from the host. Ollama Chat is mapped to `localhost:11434` for convenience; reranker is on `localhost:11435`.
 
