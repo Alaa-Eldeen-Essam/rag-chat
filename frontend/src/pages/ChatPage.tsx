@@ -123,6 +123,7 @@ export const ChatPage: React.FC = () => {
   const [conversationPage, setConversationPage] = useState(1);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [docTypeError, setDocTypeError] = useState<string | null>(null);
+  const [promptGuardMessage, setPromptGuardMessage] = useState<string | null>(null);
   const MODE_INFO_KEY = 'chat_regular_mode_info_shown';
   const [hasSeenRegularInfo, setHasSeenRegularInfo] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -479,6 +480,7 @@ export const ChatPage: React.FC = () => {
     setAssetFilterIds([]);
     setFileDropdownQuery('');
     setDocTypeError(null);
+    setPromptGuardMessage(null);
     setUploadMessage(null);
     setShowSummary(false);
     setSummaryAssetId(null);
@@ -636,8 +638,28 @@ export const ChatPage: React.FC = () => {
             })
             .catch(() => {});
         },
-        onError: () => {
+        onError: errorPayload => {
           setIsStreaming(false);
+          if (errorPayload && typeof errorPayload === 'object') {
+            const signal = (errorPayload as any).signal as string | undefined;
+            const detail =
+              typeof (errorPayload as any).detail === 'string'
+                ? (errorPayload as any).detail
+                : undefined;
+            if (signal === 'prompt_rejected') {
+              setPromptGuardMessage(detail || uiText('promptGuardBlocked'));
+              return;
+            }
+            if (detail) {
+              setPromptGuardMessage(detail);
+              return;
+            }
+          }
+          if (errorPayload instanceof Error) {
+            setPromptGuardMessage(errorPayload.message);
+            return;
+          }
+          setPromptGuardMessage(uiText('friendlyServerIssue'));
         }
       }
     );
@@ -1089,6 +1111,18 @@ export const ChatPage: React.FC = () => {
             {docTypeError && (
               <div className="text-[11px] text-amber-600">
                 {docTypeError}
+              </div>
+            )}
+            {promptGuardMessage && (
+              <div className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-4 py-1 text-[11px] text-amber-700">
+                <span>{promptGuardMessage}</span>
+                <button
+                  type="button"
+                  className="text-amber-400 hover:text-amber-600 text-[10px]"
+                  onClick={() => setPromptGuardMessage(null)}
+                >
+                  {uiText('dismiss')}
+                </button>
               </div>
             )}
           </div>

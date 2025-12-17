@@ -279,6 +279,7 @@ Authorization: Basic base64("username:password")
     - repeated `rag_answer_stream_delta` with `{ "delta": "..." }`
     - final `rag_answer_success` or `rag_answer_error`
   - The final payload includes `conversation_id`, `conversation_title`, `model`, `asset_id`, and a `message_id` that can be used for feedback (`/api/v1/stats/feedback`).
+- **Prompt guard:** If the prompt injection guard (heuristics and optional Pytector classifier) blocks the request, the API returns `HTTP 400` with `signal: "prompt_rejected"` and a `detail` string explaining why the question needs to be rephrased.
 
 ### POST `/summary/{project_id}`
 - **Body (`SummarizeRequest`):**

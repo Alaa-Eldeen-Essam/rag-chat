@@ -90,5 +90,12 @@ class Settings(BaseSettings):
     RERANKER_MODEL_ID: Optional[str] = None
     RERANKER_MAX_CANDIDATES: int = 50
 
+    # Prompt guard
+    PROMPT_GUARD_ENABLED: bool = True
+    PROMPT_GUARD_PYTECTOR: bool = False
+    PROMPT_GUARD_PYTECTOR_MODEL: Optional[str] = None
+    PROMPT_GUARD_PYTECTOR_THRESHOLD: float = 0.75
+    PROMPT_GUARD_BYPASS_HEADER: str = "X-Bypass-Prompt-Guard"
+
 def get_settings() -> Settings:
     return Settings()

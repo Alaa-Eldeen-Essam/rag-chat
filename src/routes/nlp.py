@@ -28,6 +28,7 @@ from typing import List, Optional, Dict, Any
 import re
 
 from stores.llm.LLMEnums import DocumentTypeEnum
+from utils.prompt_guard import evaluate_prompt
 
 DetectorFactory.seed = 0
 
@@ -626,6 +627,44 @@ async def answer_rag(
 
     # Project access check removed
     project = SimpleNamespace(project_id=project_id)
+
+    prompt_guard_enabled = getattr(app_settings, "PROMPT_GUARD_ENABLED", True)
+    pytector_enabled = getattr(app_settings, "PROMPT_GUARD_PYTECTOR", False)
+    pytector_model = getattr(app_settings, "PROMPT_GUARD_PYTECTOR_MODEL", None)
+    pytector_threshold = getattr(app_settings, "PROMPT_GUARD_PYTECTOR_THRESHOLD", 0.75)
+    guard_bypass_header = getattr(
+        app_settings, "PROMPT_GUARD_BYPASS_HEADER", "X-Bypass-Prompt-Guard"
+    )
+    bypass_header_value = request.headers.get(guard_bypass_header, "")
+    bypass_requested = bool(
+        bypass_header_value
+        and bypass_header_value.strip().lower() in {"1", "true", "yes", "allow"}
+    )
+
+    if prompt_guard_enabled and not bypass_requested:
+        guard_result = evaluate_prompt(
+            search_request.text,
+            use_pytector=pytector_enabled,
+            pytector_model=pytector_model,
+            pytector_threshold=pytector_threshold,
+        )
+        if guard_result.blocked:
+            detail = (
+                guard_result.detail
+                or "This request was blocked by the prompt guard. Please rephrase it."
+            )
+            logger.info(
+                "Prompt guard blocked request for user %s (source=%s)",
+                current_user.id,
+                guard_result.source or "heuristic",
+            )
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.PROMPT_REJECTED.value,
+                    "detail": detail,
+                },
+            )
 
     asset_label_lookup: Dict[int, str] = {}
     asset_label_lookup_by_name: Dict[str, str] = {}

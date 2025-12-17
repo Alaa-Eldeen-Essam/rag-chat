@@ -28,6 +28,7 @@ class ResponseSignal(Enum):
     RAG_ANSWER_STREAM_DELTA = "rag_answer_stream_delta"
     SUMMARY_STREAM_START = "summary_stream_start"
     SUMMARY_STREAM_DELTA = "summary_stream_delta"
+    PROMPT_REJECTED = "prompt_rejected"
     USER_STATS_SUCCESS = "user_stats_success"
     ADMIN_STATS_SUCCESS = "admin_stats_success"
     CONVERSATIONS_FETCH_SUCCESS = "conversations_fetch_success"

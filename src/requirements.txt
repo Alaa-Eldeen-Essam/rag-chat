@@ -18,6 +18,7 @@ nltk==3.9.1
 pytesseract==0.3.13
 Pillow==11.0.0
 PyJWT==2.8.0
+pytector==0.0.6
 # Monitoring and metrics
 prometheus-client==0.21.1
 starlette-exporter==0.23.0

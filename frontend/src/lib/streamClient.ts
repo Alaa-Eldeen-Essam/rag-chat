@@ -64,7 +64,15 @@ export const useStreamClient = () => {
               body?.message ||
               res.statusText ||
               friendlyServerMessage;
-        callbacks.onError?.(new Error(message));
+        if (body) {
+          const payload = { ...body };
+          if (!payload.detail) {
+            payload.detail = message;
+          }
+          callbacks.onError?.(payload);
+        } else {
+          callbacks.onError?.(new Error(message));
+        }
         return;
       }
 
