@@ -34,6 +34,15 @@ services:
       - "11434:11434"
     volumes:
       - ollama_chat_data:/root/.ollama
+      - ./ollama:/modelfiles
+    entrypoint: ["/bin/sh","-c"]
+    command: |
+      set -e
+      if ! ollama list 2>/dev/null | grep -q 'qwen-32k'; then
+        echo "Bootstrapping qwen-32k variant..."
+        ollama create qwen-32k -f /modelfiles/qwen-32k.Modelfile || true
+      fi
+      exec ollama serve
     networks:
       - backend
     restart: always
