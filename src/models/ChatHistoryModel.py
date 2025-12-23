@@ -19,10 +19,24 @@ class ChatHistoryModel(BaseDataModel):
         instance = cls(db_client)
         return instance
 
-    async def create_history(self, user_id: int, conversation_id: int, prompt: str, answer: str,
-                             model_key: Optional[str] = None,
-                             doc_types: Optional[List[str]] = None,
-                             response_time_ms: Optional[int] = None):
+    async def create_history(
+        self,
+        user_id: int,
+        conversation_id: int,
+        prompt: str,
+        answer: str,
+        model_key: Optional[str] = None,
+        doc_types: Optional[List[str]] = None,
+        response_time_ms: Optional[int] = None,
+        rating: Optional[int] = None,
+        is_helpful: Optional[bool] = None,
+        fallback_used: Optional[bool] = None,
+        retrieved_chunks: Optional[int] = None,
+        retrieved_doc_types: Optional[List[str]] = None,
+        retrieved_asset_ids: Optional[List[int]] = None,
+        retrieved_asset_names: Optional[List[str]] = None,
+        resources: Optional[list] = None,
+    ):
         async with self.db_client() as session:
             async with session.begin():
                 record = ChatHistory(
@@ -33,6 +47,14 @@ class ChatHistoryModel(BaseDataModel):
                     model_key=model_key,
                     doc_types=doc_types,
                     response_time_ms=response_time_ms,
+                    rating=rating,
+                    is_helpful=is_helpful,
+                    fallback_used=fallback_used,
+                    retrieved_chunks=retrieved_chunks,
+                    retrieved_doc_types=retrieved_doc_types,
+                    retrieved_asset_ids=retrieved_asset_ids,
+                    retrieved_asset_names=retrieved_asset_names,
+                    resources=resources,
                 )
                 session.add(record)
             await session.commit()

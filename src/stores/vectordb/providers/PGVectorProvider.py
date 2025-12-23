@@ -31,6 +31,7 @@ class PGVectorProvider(VectorDBInterface):
 
         self.logger = logging.getLogger("uvicorn")
         self.default_index_name = lambda collection_name: f"{collection_name}_vector_idx"
+        self.default_fts_index_name = lambda collection_name: f"{collection_name}_fts_idx"
 
     async def connect(self):
         async with self.db_client() as session:
@@ -43,7 +44,7 @@ class PGVectorProvider(VectorDBInterface):
 
                 if not extension_exists:
                     # Only create if it doesn't exist
-                    await session.execute(sql_text("CREATE EXTENSION vector"))
+                    await session.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
                     await session.commit()
             except Exception as e:
                 # If extension already exists or any other error, just log and continue
@@ -120,27 +121,60 @@ class PGVectorProvider(VectorDBInterface):
         if do_reset:
             await self.delete_collection(collection_name=collection_name)
 
-        if await self.is_collection_existed(collection_name=collection_name):
-            return False
+        collection_exists = await self.is_collection_existed(collection_name=collection_name)
 
-        self.logger.info("Creating collection: %s", collection_name)
+        if not collection_exists:
+            self.logger.info("Creating collection: %s", collection_name)
+            async with self.db_client() as session:
+                async with session.begin():
+                    create_sql = sql_text(
+                        f'CREATE TABLE {collection_name} ('
+                        f'{PgVectorTableSchemeEnums.ID.value} bigserial PRIMARY KEY,'
+                        f'{PgVectorTableSchemeEnums.TEXT.value} text NOT NULL, '
+                        f'{PgVectorTableSchemeEnums.VECTOR.value} vector({embedding_size}) NOT NULL, '
+                        f"{PgVectorTableSchemeEnums.METADATA.value} jsonb DEFAULT '{{}}'::jsonb, "
+                        f'{PgVectorTableSchemeEnums.CHUNK_ID.value} integer NOT NULL, '
+                        f'FOREIGN KEY ({PgVectorTableSchemeEnums.CHUNK_ID.value}) '
+                        f'REFERENCES chunks(chunk_id) ON DELETE CASCADE'
+                        ')'
+                    )
+                    await session.execute(create_sql)
+                    await session.commit()
+
+        # Lexical search is now handled primarily by Elasticsearch. We no longer
+        # create or maintain a Postgres FTS column/index eagerly here; FTS
+        # support is only enabled on-demand when search_by_text is used as a
+        # fallback in environments without Elasticsearch.
+        return True
+
+    async def ensure_text_search_support(self, collection_name: str) -> None:
+        """Ensure each collection has a tsvector column + GIN index for lexical search."""
         async with self.db_client() as session:
             async with session.begin():
-                create_sql = sql_text(
-                    f'CREATE TABLE {collection_name} ('
-                    f'{PgVectorTableSchemeEnums.ID.value} bigserial PRIMARY KEY,'
-                    f'{PgVectorTableSchemeEnums.TEXT.value} text NOT NULL, '
-                    f'{PgVectorTableSchemeEnums.VECTOR.value} vector({embedding_size}) NOT NULL, '
-                    f"{PgVectorTableSchemeEnums.METADATA.value} jsonb DEFAULT '{{}}'::jsonb, "
-                    f'{PgVectorTableSchemeEnums.CHUNK_ID.value} integer NOT NULL, '
-                    f'FOREIGN KEY ({PgVectorTableSchemeEnums.CHUNK_ID.value}) '
-                    f'REFERENCES chunks(chunk_id) ON DELETE CASCADE'
-                    ')'
-                )
-                await session.execute(create_sql)
-                await session.commit()
+                try:
+                    alter_sql = sql_text(
+                        f"""
+                        ALTER TABLE {collection_name}
+                        ADD COLUMN IF NOT EXISTS {PgVectorTableSchemeEnums.FTS.value} tsvector
+                        GENERATED ALWAYS AS (
+                            to_tsvector('simple', COALESCE({PgVectorTableSchemeEnums.TEXT.value}, ''))
+                        ) STORED
+                        """
+                    )
+                    await session.execute(alter_sql)
+                except Exception as exc:
+                    self.logger.error(
+                        "Failed to ensure FTS column on %s: %s", collection_name, exc
+                    )
+                    raise
 
-        return True
+                create_idx_sql = sql_text(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS {self.default_fts_index_name(collection_name)}
+                    ON {collection_name} USING GIN ({PgVectorTableSchemeEnums.FTS.value})
+                    """
+                )
+                await session.execute(create_idx_sql)
 
     async def is_index_existed(self, collection_name: str) -> bool:
         index_name = self.default_index_name(collection_name)
@@ -175,13 +209,53 @@ class PGVectorProvider(VectorDBInterface):
                     return False
 
                 self.logger.info("START: Creating vector index for %s", collection_name)
+
+                # Determine effective index type. HNSW in pgvector has a hard limit
+                # of 2000 dimensions; for larger embeddings (e.g., 2560-dim models
+                # like Qwen3 Embedding 4B), fall back to IVFFLAT automatically.
+                effective_index_type = index_type
+                embedding_dim = None
+                try:
+                    # collection naming convention: collection_{dim}_{project_id}
+                    parts = collection_name.split("_")
+                    if len(parts) >= 3:
+                        embedding_dim = int(parts[1])
+                except Exception:
+                    embedding_dim = None
+
+                if embedding_dim is None:
+                    embedding_dim = self.default_vector_size
+
+                if (
+                    embedding_dim is not None
+                    and embedding_dim > 2000
+                    and effective_index_type == PgVectorIndexTypeEnums.HNSW.value
+                ):
+                    self.logger.info(
+                        "Embedding dimension %s exceeds HNSW limit; "
+                        "using IVFFLAT index for %s instead of HNSW",
+                        embedding_dim,
+                        collection_name,
+                    )
+                    effective_index_type = PgVectorIndexTypeEnums.IVFFLAT.value
+
                 index_name = self.default_index_name(collection_name)
-                create_idx_sql = sql_text(
-                    f'CREATE INDEX {index_name} ON {collection_name} '
-                    f'USING {index_type} '
-                    f'({PgVectorTableSchemeEnums.VECTOR.value} {self.distance_method})'
-                )
-                await session.execute(create_idx_sql)
+                try:
+                    create_idx_sql = sql_text(
+                        f'CREATE INDEX {index_name} ON {collection_name} '
+                        f'USING {effective_index_type} '
+                        f'({PgVectorTableSchemeEnums.VECTOR.value} {self.distance_method})'
+                    )
+                    await session.execute(create_idx_sql)
+                except Exception as exc:
+                    self.logger.error(
+                        "Failed to create vector index %s on %s: %s",
+                        index_name,
+                        collection_name,
+                        exc,
+                    )
+                    return False
+
                 self.logger.info("END: Created vector index for %s", collection_name)
 
         return True
@@ -306,7 +380,8 @@ class PGVectorProvider(VectorDBInterface):
                     f'SELECT '
                     f'{PgVectorTableSchemeEnums.TEXT.value} AS text, '
                     f'{score_expr} AS score, '
-                    f'{PgVectorTableSchemeEnums.METADATA.value} AS metadata '
+                    f'{PgVectorTableSchemeEnums.METADATA.value} AS metadata, '
+                    f'{PgVectorTableSchemeEnums.CHUNK_ID.value} AS chunk_id '
                     f'FROM {collection_name} '
                     'ORDER BY score DESC '
                     'LIMIT :limit'
@@ -324,6 +399,66 @@ class PGVectorProvider(VectorDBInterface):
                     metadata_value = json.loads(metadata_value)
                 except json.JSONDecodeError:
                     metadata_value = None
+            chunk_id_value = getattr(record, "chunk_id", None)
+            if chunk_id_value is not None:
+                if isinstance(metadata_value, dict):
+                    metadata_value = {**metadata_value, "chunk_id": chunk_id_value}
+                else:
+                    metadata_value = {"chunk_id": chunk_id_value}
+            documents.append(
+                RetrievedDocument(
+                    text=record.text,
+                    score=float(record.score) if record.score is not None else 0.0,
+                    metadata=metadata_value if isinstance(metadata_value, dict) else None,
+                )
+            )
+
+        return documents
+
+    async def search_by_text(self, collection_name: str, query: str, limit: int):
+        if not query:
+            return []
+
+        if not await self.is_collection_existed(collection_name):
+            self.logger.error("Can not search non-existent collection: %s", collection_name)
+            return []
+
+        await self.ensure_text_search_support(collection_name)
+
+        async with self.db_client() as session:
+            async with session.begin():
+                search_sql = sql_text(
+                    f"""
+                    SELECT
+                        {PgVectorTableSchemeEnums.TEXT.value} AS text,
+                        ts_rank_cd({PgVectorTableSchemeEnums.FTS.value}, websearch_to_tsquery(:query)) AS score,
+                        {PgVectorTableSchemeEnums.METADATA.value} AS metadata,
+                        {PgVectorTableSchemeEnums.CHUNK_ID.value} AS chunk_id
+                    FROM {collection_name}
+                    WHERE {PgVectorTableSchemeEnums.FTS.value} @@ websearch_to_tsquery(:query)
+                    ORDER BY score DESC
+                    LIMIT :limit
+                    """
+                )
+                result = await session.execute(
+                    search_sql, {"query": query, "limit": limit}
+                )
+                records = result.fetchall()
+
+        documents: List[RetrievedDocument] = []
+        for record in records:
+            metadata_value: Optional[Any] = getattr(record, "metadata", None)
+            if isinstance(metadata_value, str):
+                try:
+                    metadata_value = json.loads(metadata_value)
+                except json.JSONDecodeError:
+                    metadata_value = None
+            chunk_id_value = getattr(record, "chunk_id", None)
+            if chunk_id_value is not None:
+                if isinstance(metadata_value, dict):
+                    metadata_value = {**metadata_value, "chunk_id": chunk_id_value}
+                else:
+                    metadata_value = {"chunk_id": chunk_id_value}
             documents.append(
                 RetrievedDocument(
                     text=record.text,

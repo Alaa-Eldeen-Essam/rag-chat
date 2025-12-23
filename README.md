@@ -65,13 +65,58 @@ $ sudo docker compose up -d
 
 ## Run the FastAPI server
 
+From the project root (where `src/main.py` lives):
+
 ```bash
-$ uvicorn main:app --reload --host 0.0.0.0 --port 5000
+uvicorn main:app --reload --host 0.0.0.0 --port 5000
 ```
+
+Make sure your vector database and LLM backend (e.g. Ollama) are running and that the corresponding environment variables (`VECTOR_DB_BACKEND`, `GENERATION_BACKEND`, `OPENAI_API_URL`, `GENERATION_MODEL_ID`, etc.) are set.
+
+## Run the React frontend
+
+The frontend lives in `./frontend` and talks to the FastAPI backend over HTTP Basic Auth.
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+By default it expects the API at `http://localhost:5000` and will prompt for credentials on the login screen.
 
 ## POSTMAN Collection
 
 Download the POSTMAN collection from [/assets/mini-rag-app.postman_collection.json](/assets/mini-rag-app.postman_collection.json)
+
+## Documentation
+
+The repository includes more detailed documentation for different parts of the system:
+
+- API reference and signals: `APIs.md`
+- Frontend overview (pages, streaming, roles): `frontend/README.md`
+- Authentication and roles: `docs/auth.md`
+- Visibility and access control: `docs/visibility.md`
+- RAG and summary pipelines: `docs/rag-summary.md`
+- Streaming protocol (NDJSON, signals): `docs/streaming.md`
+- Stats and analytics interpretation: `docs/stats.md`
+- Database schema and relationships: `docs/schema.md`
+
+## Prompt Injection Guard
+
+Every chat request now passes through a lightweight prompt guard before it touches the RAG pipeline. The guard uses deterministic heuristics to block obvious jailbreak attempts such as “ignore previous instructions”, fake `<system>` tags, or large encoded payloads. You can optionally enable the [Pytector](https://github.com/MaxMLang/pytector) classifier for an additional ML-based check (Python 3.10 compatible).
+
+Environment flags (see `.env.example` or `docker/env/.env.app`):
+
+```
+PROMPT_GUARD_ENABLED=true            # master switch
+PROMPT_GUARD_PYTECTOR=false          # set to true to enable the Pytector classifier
+PROMPT_GUARD_PYTECTOR_MODEL="deberta"
+PROMPT_GUARD_PYTECTOR_THRESHOLD=0.75
+PROMPT_GUARD_BYPASS_HEADER="X-Bypass-Prompt-Guard"
+```
+
+Admins can bypass the guard during debugging by sending the header defined in `PROMPT_GUARD_BYPASS_HEADER` with a value of `true/1`. When a prompt is blocked the backend returns a `prompt_rejected` signal and the React client shows a friendly banner asking the user to rephrase the question.
 
 ## Troubleshooting: Connection Issues with Ollama in WSL2/Windows Setup
 

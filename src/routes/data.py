@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, status, Request, Form
+from fastapi import APIRouter, Depends, UploadFile, status, Request, Form, Query, File
 from fastapi.responses import JSONResponse
 import os
 from helpers.config import get_settings, Settings
@@ -7,13 +7,17 @@ from controllers import DataController, ProjectController, ProcessController, NL
 import aiofiles
 from models import ResponseSignal
 import logging
-from .schemes.data import ProcessRequest
+from .schemes.data import ProcessRequest, UpdateDocTypeRequest, UpdateVisibilityRequest
 from models.ProjectModel import ProjectModel
 from models.ChunkModel import ChunkModel
 from models.AssetModel import AssetModel
+from models.SummaryModel import SummaryModel
 from models.db_schemes import DataChunk, Asset, User
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from routes.dependencies import get_current_user
+from typing import List, Optional
+from types import SimpleNamespace
+from sqlalchemy import select
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -31,13 +35,34 @@ def normalize_document_type(value: str) -> str:
     normalized = value.strip()
     return normalized if normalized else DOCUMENT_TYPE_DEFAULT
 
+
+def normalize_department_list(values: Optional[List[str]]):
+    if not values:
+        return []
+    cleaned = []
+    seen = set()
+    for entry in values:
+        if not entry:
+            continue
+        value = str(entry).strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(value)
+    return cleaned
+
 @data_router.post("/upload/{project_id}")
 async def upload_data(
     request: Request,
     project_id: int,
     file: UploadFile,
     is_private: bool = Form(True),
-    doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
+    doc_type: str = Form(""),
+    visibility: str = Form("private"),
+    department: List[str] = Form([]),
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
@@ -100,6 +125,26 @@ async def upload_data(
         db_client=request.app.db_client
     )
 
+    vis = (visibility or "").strip().lower()
+    if vis not in ("private", "department", "global"):
+        vis = "private" if is_private else "global"
+    department_list = normalize_department_list(department)
+    effective_department = None
+    if vis == "department":
+        if not department_list:
+            fallback_dept = getattr(current_user, "department", None) or "Global"
+            department_list = [fallback_dept]
+        effective_department = department_list
+
+    if not doc_type or not doc_type.strip():
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.FILE_TYPE_NOT_SUPPORTED.value,
+                "detail": "Document type is required."
+            },
+        )
+
     normalized_doc_type = normalize_document_type(doc_type)
 
     asset_resource = Asset(
@@ -108,7 +153,9 @@ async def upload_data(
         asset_type=AssetTypeEnum.FILE.value,
         asset_name=file_id,
         asset_size=os.path.getsize(file_path),
-        asset_is_private=is_private,
+        asset_is_private=(vis == "private"),
+        asset_visibility=vis,
+        asset_department=effective_department,
         asset_document_type=normalized_doc_type,
         asset_config={
             "original_filename": file.filename
@@ -133,11 +180,13 @@ async def upload_process_index(
     request: Request,
     project_id: int,
     file: UploadFile,
-    chunk_size: int = Form(100),
-    overlap_size: int = Form(20),
+    chunk_size: int = Form(400),
+    overlap_size: int = Form(50),
     do_reset: int = Form(0),
     is_private: bool = Form(True),
     doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
+    visibility: str = Form("private"),
+    department: List[str] = Form([]),
     current_user: User = Depends(get_current_user),
     app_settings: Settings = Depends(get_settings),
 ):
@@ -151,7 +200,7 @@ async def upload_process_index(
         current_user=current_user,
         create_if_missing=True,
         is_private=is_private,
-        require_owner=True,
+        require_owner=False,
     )
 
     if project is None:
@@ -200,6 +249,20 @@ async def upload_process_index(
     chunk_model = await ChunkModel.create_instance(
         db_client=request.app.db_client
     )
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    vis = (visibility or "").strip().lower()
+    if vis not in ("private", "department", "global"):
+        vis = "private" if is_private else "global"
+    department_list = normalize_department_list(department)
+    effective_department = None
+    if vis == "department":
+        if not department_list:
+            fallback_dept = getattr(current_user, "department", None) or "Global"
+            department_list = [fallback_dept]
+        effective_department = department_list
 
     normalized_doc_type = normalize_document_type(doc_type)
     asset_resource = Asset(
@@ -208,7 +271,9 @@ async def upload_process_index(
         asset_type=AssetTypeEnum.FILE.value,
         asset_name=file_id,
         asset_size=os.path.getsize(file_path),
-        asset_is_private=is_private,
+        asset_is_private=(vis == "private"),
+        asset_visibility=vis,
+        asset_department=effective_department,
         asset_document_type=normalized_doc_type,
         asset_config={
             "original_filename": file.filename
@@ -279,6 +344,7 @@ async def upload_process_index(
         generation_client=request.app.generation_client,
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
+        search_client=getattr(request.app, "search_client", None),
     )
 
     indexed = await nlp_controller.index_into_vector_db(
@@ -317,6 +383,248 @@ async def upload_process_index(
         }
     )
 
+
+@data_router.post("/upload/process/index/batch/{project_id}")
+async def upload_process_index_batch(
+    request: Request,
+    project_id: int,
+    files: List[UploadFile] = File(...),
+    chunk_size: int = Form(500),
+    overlap_size: int = Form(100),
+    do_reset: int = Form(0),
+    is_private: bool = Form(True),
+    doc_type: str = Form(""),
+    visibility: str = Form("private"),
+    department: List[str] = Form([]),
+    current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
+):
+    if not files:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.FILE_UPLOAD_FAILED.value,
+                "detail": "No files provided for upload."
+            }
+        )
+
+    project_model = await ProjectModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    project, status_code = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=True,
+        is_private=is_private,
+        require_owner=False,
+    )
+
+    if project is None:
+        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        return JSONResponse(
+            status_code=response_status,
+            content={
+                "signal": response_signal
+            }
+        )
+
+    data_controller = DataController()
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+    chunk_model = await ChunkModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    vis = (visibility or "").strip().lower()
+    if vis not in ("private", "department", "global"):
+        vis = "private" if is_private else "global"
+    department_list = normalize_department_list(department)
+    effective_department = None
+    if vis == "department":
+        if not department_list:
+            fallback_dept = getattr(current_user, "department", None) or "Global"
+            department_list = [fallback_dept]
+        effective_department = department_list
+
+    if not doc_type or not doc_type.strip():
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.FILE_TYPE_NOT_SUPPORTED.value,
+                "detail": "Document type is required."
+            },
+        )
+
+    normalized_doc_type = normalize_document_type(doc_type)
+
+    results = []
+
+    for upload_file in files:
+        is_valid, result_signal = data_controller.validate_uploaded_file(
+            file=upload_file
+        )
+        if not is_valid:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": result_signal,
+                    "detail": f"File '{upload_file.filename}' is not supported.",
+                },
+            )
+
+        _ = ProjectController().get_project_path(project_id=project_id)
+        file_path, file_id = data_controller.generate_unique_filepath(
+            orig_file_name=upload_file.filename,
+            project_id=project_id
+        )
+
+        try:
+            async with aiofiles.open(file_path, "wb") as f:
+                while chunk := await upload_file.read(app_settings.FILE_DEFAULT_CHUNK_SIZE):
+                    await f.write(chunk)
+        except Exception as exc:
+            logger.error("Error while uploading file: %s", exc)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.FILE_UPLOAD_FAILED.value,
+                    "detail": f"Error while uploading file '{upload_file.filename}'."
+                }
+            )
+
+        asset_resource = Asset(
+            asset_project_id=project.project_id,
+            asset_user_id=current_user.id,
+            asset_type=AssetTypeEnum.FILE.value,
+            asset_name=file_id,
+            asset_size=os.path.getsize(file_path),
+            asset_is_private=(vis == "private"),
+            asset_visibility=vis,
+            asset_department=effective_department,
+            asset_document_type=normalized_doc_type,
+            asset_config={
+                "original_filename": upload_file.filename
+            },
+        )
+        asset_record = await asset_model.create_asset(asset=asset_resource)
+
+        process_controller = ProcessController(project_id=project_id)
+        file_content = process_controller.get_file_content(file_id=file_id)
+
+        if file_content is None:
+            logger.error("Error while processing uploaded file: %s", file_id)
+            await asset_model.delete_asset(asset_record)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.PROCESSING_FAILED.value,
+                    "detail": f"Error while processing file '{upload_file.filename}'."
+                }
+            )
+
+        file_chunks = process_controller.process_file_content(
+            file_content=file_content,
+            file_id=file_id,
+            chunk_size=chunk_size,
+            overlap_size=overlap_size
+        )
+
+        if not file_chunks:
+            await asset_model.delete_asset(asset_record)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.PROCESSING_FAILED.value,
+                    "detail": f"Failed to split file '{upload_file.filename}' into chunks."
+                }
+            )
+
+        existing_chunk_ids = set(
+            await chunk_model.get_chunk_ids_by_asset_ids([asset_record.asset_id])
+        )
+
+        file_chunks_records = [
+            DataChunk(
+                chunk_text=chunk.page_content,
+                chunk_metadata={
+                    **(chunk.metadata or {}),
+                    "doc_type": normalized_doc_type,
+                    "asset_id": asset_record.asset_id,
+                    "source_name": upload_file.filename,
+                    "original_filename": upload_file.filename,
+                },
+                chunk_order=i + 1,
+                chunk_project_id=project.project_id,
+                chunk_asset_id=asset_record.asset_id,
+            )
+            for i, chunk in enumerate(file_chunks)
+        ]
+
+        await chunk_model.insert_many_chunks(file_chunks_records)
+
+        updated_chunk_ids = set(
+            await chunk_model.get_chunk_ids_by_asset_ids([asset_record.asset_id])
+        )
+        new_chunk_ids = sorted(updated_chunk_ids - existing_chunk_ids)
+        new_chunks = await chunk_model.get_chunks_by_ids(new_chunk_ids)
+
+        nlp_controller = NLPController(
+            vectordb_client=request.app.vectordb_client,
+            generation_client=request.app.generation_client,
+            embedding_client=request.app.embedding_client,
+            template_parser=request.app.template_parser,
+            search_client=getattr(request.app, "search_client", None),
+        )
+
+        indexed = await nlp_controller.index_into_vector_db(
+            project=project,
+            chunks=new_chunks,
+            chunks_ids=new_chunk_ids,
+            do_reset=bool(do_reset),
+        )
+
+        if not indexed:
+            await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+            await asset_model.delete_asset(asset_record)
+            await request.app.vectordb_client.delete_records(
+                nlp_controller.create_collection_name(project.project_id),
+                new_chunk_ids,
+            )
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "signal": ResponseSignal.INSERT_INTO_VECTORDB_ERROR.value,
+                    "detail": f"Failed to index chunks for '{upload_file.filename}' into the vector database.",
+                },
+            )
+
+        results.append(
+            {
+                "asset_id": asset_record.asset_id,
+                "stored_file_name": asset_record.asset_name,
+                "original_file_name": upload_file.filename,
+                "visibility": vis,
+                "department": effective_department,
+                "indexed_chunks": len(new_chunk_ids),
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.INSERT_INTO_VECTORDB_SUCCESS.value,
+            "files": results,
+        }
+    )
+
 @data_router.post("/process/{project_id}")
 async def process_endpoint(
     request: Request,
@@ -346,6 +654,7 @@ async def process_endpoint(
         generation_client=request.app.generation_client,
         embedding_client=request.app.embedding_client,
         template_parser=request.app.template_parser,
+        search_client=getattr(request.app, "search_client", None),
     )
     if project is None:
         response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
@@ -484,42 +793,48 @@ async def process_endpoint(
         }
     )
 
-@data_router.get("/assets/{project_id}")
+@data_router.get("/assets")
 async def list_assets(
     request: Request,
-    project_id: int,
+    project_id: int = Query(None),
     current_user: User = Depends(get_current_user),
 ):
-    project_model = await ProjectModel.create_instance(
-        db_client=request.app.db_client
-    )
-
-    project, status_code = await project_model.get_project_or_create_one(
-        project_id=project_id,
-        current_user=current_user,
-        create_if_missing=False,
-        is_private=None
-    )
-
-    if not project:
-        response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
-        response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
-        return JSONResponse(
-            status_code=response_status,
-            content={
-                "signal": response_signal
-            }
-        )
-
     asset_model = await AssetModel.create_instance(
         db_client=request.app.db_client
     )
 
-    assets = await asset_model.get_all_project_assets(
-        asset_project_id=project.project_id,
-        asset_type=AssetTypeEnum.FILE.value,
-        current_user=current_user
-    )
+    if project_id is not None:
+        project_model = await ProjectModel.create_instance(
+            db_client=request.app.db_client
+        )
+
+        project, status_code = await project_model.get_project_or_create_one(
+            project_id=project_id,
+            current_user=current_user,
+            create_if_missing=False,
+            is_private=None
+        )
+
+        if not project:
+            response_status = status.HTTP_403_FORBIDDEN if status_code == "forbidden" else status.HTTP_404_NOT_FOUND
+            response_signal = ResponseSignal.ACCESS_FORBIDDEN_ERROR.value if status_code == "forbidden" else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+            return JSONResponse(
+                status_code=response_status,
+                content={
+                    "signal": response_signal
+                }
+            )
+
+        assets = await asset_model.get_all_project_assets(
+            asset_project_id=project.project_id,
+            asset_type=AssetTypeEnum.FILE.value,
+            current_user=current_user
+        )
+    else:
+        assets = await asset_model.get_all_accessible_assets(
+            asset_type=AssetTypeEnum.FILE.value,
+            current_user=current_user
+        )
 
     payload = []
     for asset in assets:
@@ -534,6 +849,9 @@ async def list_assets(
                 "original_name": original_name,
                 "doc_type": asset.asset_document_type or DOCUMENT_TYPE_DEFAULT,
                 "is_private": asset.asset_is_private,
+                "visibility": getattr(asset, "asset_visibility", None),
+                "department": getattr(asset, "asset_department", None),
+                "departments": getattr(asset, "asset_department", None),
                 "size": asset.asset_size,
                 "created_at": asset.created_at.isoformat() if getattr(asset, "created_at", None) else None,
                 "updated_at": asset.updated_at.isoformat() if getattr(asset, "updated_at", None) else None,
@@ -578,6 +896,19 @@ async def delete_asset(
             }
         )
 
+    # Only the owner of the file or an admin can delete it,
+    # even if the file is public/global.
+    is_owner = asset_record.asset_user_id == getattr(current_user, "id", None)
+    is_admin = getattr(current_user, "is_admin", False)
+    if not (is_owner or is_admin):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Only the file owner or an admin can delete this file.",
+            },
+        )
+
     chunk_model = await ChunkModel.create_instance(
         db_client=request.app.db_client
     )
@@ -590,6 +921,7 @@ async def delete_asset(
             generation_client=request.app.generation_client,
             embedding_client=request.app.embedding_client,
             template_parser=request.app.template_parser,
+            search_client=getattr(request.app, "search_client", None),
         )
         collection_name = nlp_controller.create_collection_name(
             project_id=asset_record.asset_project_id
@@ -597,10 +929,218 @@ async def delete_asset(
         await request.app.vectordb_client.delete_records(collection_name, chunk_ids)
 
     await chunk_model.delete_chunks_by_asset_ids([asset_record.asset_id])
+    summary_model = await SummaryModel.create_instance(
+        db_client=request.app.db_client
+    )
+    await summary_model.delete_summaries_by_asset_id(asset_record.asset_id)
+
+    # Also delete the underlying file from disk if it exists.
+    try:
+        project_path = ProjectController().get_project_path(
+            project_id=asset_record.asset_project_id
+        )
+        file_path = os.path.join(project_path, asset_record.asset_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as exc:
+        logger.error(
+            "Failed to delete file from disk for asset %s: %s",
+            asset_id,
+            exc,
+        )
+
     await asset_model.delete_asset(asset_record)
 
     return JSONResponse(
         content={
             "signal": ResponseSignal.FILE_DELETE_SUCCESS.value
+        }
+    )
+
+
+@data_router.patch("/assets/{asset_id}/doc-type")
+async def update_asset_doc_type(
+    request: Request,
+    asset_id: int,
+    update_request: UpdateDocTypeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update the document type of an asset.
+    - Admins can update any asset.
+    - Regular users can only update assets they own.
+    """
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user,
+    )
+
+    if asset_record is None:
+        if exists_or_forbidden:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
+                },
+            )
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.FILE_ID_ERROR.value
+            },
+        )
+
+    is_owner = asset_record.asset_user_id == getattr(current_user, "id", None)
+    is_admin = getattr(current_user, "is_admin", False)
+    if not (is_owner or is_admin):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Only the file owner or an admin can modify this file.",
+            },
+        )
+
+    new_doc_type = normalize_document_type(update_request.doc_type or "")
+
+    # Update asset's document type
+    async with request.app.db_client() as session:
+        async with session.begin():
+            db_asset = await session.get(Asset, asset_record.asset_id)
+            if db_asset is not None:
+                db_asset.asset_document_type = new_doc_type
+
+            # Also update doc_type inside chunk_metadata for all related chunks
+            result = await session.execute(
+                select(DataChunk).where(
+                    DataChunk.chunk_asset_id == asset_record.asset_id
+                )
+            )
+            chunks = result.scalars().all()
+            for ch in chunks:
+                meta = dict(ch.chunk_metadata or {})
+                meta["doc_type"] = new_doc_type
+                ch.chunk_metadata = meta
+
+    # Re-index affected chunks in the vector DB so that metadata used for
+    # filtering and analytics stays in sync.
+    chunk_model = await ChunkModel.create_instance(
+        db_client=request.app.db_client
+    )
+    chunk_ids = await chunk_model.get_chunk_ids_by_asset_ids(
+        [asset_record.asset_id]
+    )
+
+    if chunk_ids:
+        updated_chunks = await chunk_model.get_chunks_by_ids(chunk_ids)
+
+        nlp_controller = NLPController(
+            vectordb_client=request.app.vectordb_client,
+            generation_client=request.app.generation_client,
+            embedding_client=request.app.embedding_client,
+            template_parser=request.app.template_parser,
+        )
+
+        collection_name = nlp_controller.create_collection_name(
+            project_id=asset_record.asset_project_id
+        )
+
+        # Remove existing vector records for these chunks, then re-index with
+        # updated metadata (text is unchanged, but doc_type is).
+        await request.app.vectordb_client.delete_records(
+            collection_name, chunk_ids
+        )
+
+        project_stub = SimpleNamespace(
+            project_id=asset_record.asset_project_id
+        )
+        await nlp_controller.index_into_vector_db(
+            project=project_stub,
+            chunks=updated_chunks,
+            chunks_ids=chunk_ids,
+            do_reset=False,
+        )
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_UPLOAD_SUCCESS.value,
+            "asset_id": asset_record.asset_id,
+            "doc_type": new_doc_type,
+        }
+    )
+
+
+@data_router.patch("/assets/{asset_id}/visibility")
+async def update_asset_visibility(
+    request: Request,
+    asset_id: int,
+    update_request: UpdateVisibilityRequest,
+    current_user: User = Depends(get_current_user),
+):
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user,
+    )
+
+    if asset_record is None:
+        if exists_or_forbidden:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
+                },
+            )
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.FILE_ID_ERROR.value
+            },
+        )
+
+    is_owner = asset_record.asset_user_id == getattr(current_user, "id", None)
+    is_admin = getattr(current_user, "is_admin", False)
+    if not (is_owner or is_admin):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Only the file owner or an admin can modify this file.",
+            },
+        )
+
+    vis = (update_request.visibility or "").strip().lower()
+    if vis not in ("private", "department", "global"):
+        vis = "private"
+
+    departments = normalize_department_list(update_request.departments)
+    if vis == "department" and not departments:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value,
+                "detail": "Department visibility requires at least one department."
+            }
+        )
+
+    await asset_model.update_visibility(asset_record.asset_id, vis)
+    if vis == "department":
+        normalized = await asset_model.set_asset_departments(asset_record.asset_id, departments)
+    else:
+        normalized = await asset_model.set_asset_departments(asset_record.asset_id, [])
+
+    return JSONResponse(
+        content={
+            "signal": ResponseSignal.FILE_LIST_SUCCESS.value,
+            "visibility": vis,
+            "is_private": vis == "private",
+            "departments": normalized,
         }
     )

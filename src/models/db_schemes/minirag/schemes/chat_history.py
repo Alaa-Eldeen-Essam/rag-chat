@@ -1,5 +1,5 @@
 from .minirag_base import SQLAlchemyBase
-from sqlalchemy import Column, Integer, Text, DateTime, func, ForeignKey, String
+from sqlalchemy import Column, Integer, Text, DateTime, func, ForeignKey, String, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -16,6 +16,22 @@ class ChatHistory(SQLAlchemyBase):
     response_time_ms = Column(Integer, nullable=True)
     model_key = Column(String, nullable=True)
     doc_types = Column(JSONB, nullable=True)
+
+    # Optional quality and retrieval metadata
+    rating = Column(Integer, nullable=True)  # 1-5 stars or similar scale
+    is_helpful = Column(Boolean, nullable=True)
+    fallback_used = Column(Boolean, nullable=True)
+    retrieved_chunks = Column(Integer, nullable=True)
+    retrieved_doc_types = Column(JSONB, nullable=True)
+    retrieved_asset_ids = Column(JSONB, nullable=True)
+    retrieved_asset_names = Column(JSONB, nullable=True)
+
+    # Persisted list of resources (RAG evidence) associated with this
+    # exchange so that the frontend can re-display them when loading
+    # conversation history. Each item is expected to mirror the
+    # structure of the `sources` list returned at answer time
+    # (file_name, location, page, excerpt_index, snippet, ...).
+    resources = Column(JSONB, nullable=True)
 
     user = relationship("User", back_populates="chat_history")
     conversation = relationship("ChatConversation", back_populates="history")

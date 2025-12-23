@@ -1,5 +1,5 @@
 from .minirag_base import SQLAlchemyBase
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func, Boolean, text
 from sqlalchemy.orm import relationship
 from sqlalchemy import Index
 
@@ -11,6 +11,7 @@ class ChatConversation(SQLAlchemyBase):
     conversation_id = Column(Integer, primary_key=True, autoincrement=True)
     conversation_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     conversation_title = Column(String, nullable=False)
+    conversation_is_pinned = Column(Boolean, nullable=False, server_default=text("false"))
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)

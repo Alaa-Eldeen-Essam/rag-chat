@@ -11,7 +11,7 @@ class OpenAIProvider(LLMInterface):
     def __init__(self, api_key: str, api_url: str=None,
                        default_input_max_characters: int=1000,
                        default_generation_max_output_tokens: int=1000,
-                       default_generation_temperature: float=0.1):
+                       default_generation_temperature: float=0):
         
         self.api_key = api_key
         self.api_url = api_url
@@ -56,17 +56,20 @@ class OpenAIProvider(LLMInterface):
             return None
         
         max_output_tokens = max_output_tokens if max_output_tokens else self.default_generation_max_output_tokens
-        temperature = temperature if temperature else self.default_generation_temperature
+        # For deterministic behavior in RAG/QA flows, default to
+        # temperature 0 and top_p 1 unless explicitly overridden.
+        temperature = self.default_generation_temperature if temperature is None else temperature
 
         chat_history.append(
             self.construct_prompt(prompt=prompt, role=OpenAIEnums.USER.value)
         )
 
         response = self.client.chat.completions.create(
-            model = self.generation_model_id,
-            messages = chat_history,
-            max_tokens = max_output_tokens,
-            temperature = temperature
+            model=self.generation_model_id,
+            messages=chat_history,
+            max_tokens=max_output_tokens,
+            temperature=temperature,
+            top_p=1.0,
         )
 
         if not response or not response.choices or len(response.choices) == 0 or not response.choices[0].message:
@@ -83,14 +86,26 @@ class OpenAIProvider(LLMInterface):
             for part in content:
                 part_type = getattr(part, "type", None)
                 part_text = getattr(part, "text", None)
+                part_content = getattr(part, "content", None)
+
+                if isinstance(part, dict):
+                    part_type = part.get("type", part_type)
+                    if part_text is None:
+                        part_text = part.get("text")
+                    if part_content is None:
+                        part_content = part.get("content")
 
                 if part_text:
                     target = answer_parts
-                    if part_type and part_type.lower() in ("reasoning", "analysis", "thought"):
+                    if part_type and isinstance(part_type, str) and part_type.lower() in ("reasoning", "analysis", "thought"):
                         target = reasoning_parts
                     target.append(part_text.strip())
-                elif hasattr(part, "content") and isinstance(part.content, str):
-                    answer_parts.append(part.content.strip())
+                elif isinstance(part_content, str):
+                    answer_parts.append(part_content.strip())
+                elif isinstance(part_content, list):
+                    for text_piece in self._extract_text_parts(part_content):
+                        if text_piece.strip():
+                            answer_parts.append(text_piece.strip())
 
         elif isinstance(content, str) and content.strip():
             answer_parts.append(content.strip())
@@ -154,6 +169,20 @@ class OpenAIProvider(LLMInterface):
                 texts.extend(self._extract_text_parts(item))
             return texts
 
+        if isinstance(value, dict):
+            text_value = value.get("text")
+            if isinstance(text_value, str):
+                texts.append(text_value)
+            elif isinstance(text_value, list):
+                texts.extend(self._extract_text_parts(text_value))
+
+            content_value = value.get("content")
+            if isinstance(content_value, str):
+                texts.append(content_value)
+            elif isinstance(content_value, list):
+                texts.extend(self._extract_text_parts(content_value))
+            return texts
+
         text_attr = getattr(value, "text", None)
         if isinstance(text_attr, str):
             texts.append(text_attr)
@@ -172,7 +201,7 @@ class OpenAIProvider(LLMInterface):
             return iter(())
 
         max_output_tokens = max_output_tokens if max_output_tokens else self.default_generation_max_output_tokens
-        temperature = temperature if temperature else self.default_generation_temperature
+        temperature = self.default_generation_temperature if temperature is None else temperature
 
         history = list(chat_history) if chat_history else []
         history.append(
@@ -193,7 +222,8 @@ class OpenAIProvider(LLMInterface):
                     messages=history,
                     max_tokens=max_output_tokens,
                     temperature=temperature,
-                    stream=True
+                    top_p=1.0,
+                    stream=True,
                 )
 
                 for chunk in stream:
@@ -206,11 +236,13 @@ class OpenAIProvider(LLMInterface):
                     if not delta:
                         continue
 
-                    for text_piece in self._extract_text_parts(getattr(delta, "content", None)):
+                    content_value = getattr(delta, "content", None)
+                    for text_piece in self._extract_text_parts(content_value):
                         output_collector.append(text_piece)
                         yield text_piece
 
-                    for reasoning_piece in self._extract_text_parts(getattr(delta, "reasoning", None)):
+                    reasoning_value = getattr(delta, "reasoning", None)
+                    for reasoning_piece in self._extract_text_parts(reasoning_value):
                         reasoning_collector.append(reasoning_piece)
 
                     finish_reason = getattr(choice, "finish_reason", None)
@@ -219,9 +251,11 @@ class OpenAIProvider(LLMInterface):
 
                 if last_choice and getattr(last_choice, "message", None):
                     message_obj = last_choice.message
-                    for text_piece in self._extract_text_parts(getattr(message_obj, "content", None)):
+                    final_content = getattr(message_obj, "content", None)
+                    for text_piece in self._extract_text_parts(final_content):
                         output_collector.append(text_piece)
-                    for reasoning_piece in self._extract_text_parts(getattr(message_obj, "reasoning", None)):
+                    final_reasoning = getattr(message_obj, "reasoning", None)
+                    for reasoning_piece in self._extract_text_parts(final_reasoning):
                         reasoning_collector.append(reasoning_piece)
 
             except Exception as exc:
@@ -235,22 +269,60 @@ class OpenAIProvider(LLMInterface):
         if not self.client:
             self.logger.error("OpenAI client was not set")
             return None
+
         if isinstance(text, str):
             text = [text]
+
         if not self.embedding_model_id:
             self.logger.error("Embedding model for OpenAI was not set")
             return None
-        
-        response = self.client.embeddings.create(
-            model = self.embedding_model_id,
-            input = text,
-        )
 
-        if not response or not response.data or len(response.data) == 0 or not response.data[0].embedding:
-            self.logger.error("Error while embedding text with OpenAI")
+        # Ensure each input string is reasonably short for the embedding model.
+        # This helps avoid backend crashes on very long inputs (e.g., GGML asserts).
+        processed_inputs = [self.process_text(t or "") for t in text]
+
+        # To avoid overloading the embedding backend (e.g., Ollama + GGML),
+        # especially on large uploads, embed in small batches and concatenate.
+        all_embeddings: List[List[float]] = []
+        batch_size = 16
+
+        for i in range(0, len(processed_inputs), batch_size):
+            batch_inputs = processed_inputs[i:i + batch_size]
+            try:
+                response = self.client.embeddings.create(
+                    model=self.embedding_model_id,
+                    input=batch_inputs,
+                )
+            except Exception as exc:
+                # If the Ollama / OpenAI-compatible backend crashes (e.g., GGML_ASSERT
+                # or VRAM-related failures), make sure we don't crash the FastAPI app.
+                self.logger.error(
+                    "Error while embedding text with OpenAI-compatible backend "
+                    "(model=%s): %s",
+                    self.embedding_model_id,
+                    exc,
+                )
+                return None
+
+            if not response or not response.data:
+                self.logger.error("Error while embedding text with OpenAI: empty response")
+                return None
+
+            for rec in response.data:
+                if not getattr(rec, "embedding", None):
+                    self.logger.error("Error while embedding text with OpenAI: missing embedding in record")
+                    return None
+                all_embeddings.append(rec.embedding)
+
+        if len(all_embeddings) != len(processed_inputs):
+            self.logger.error(
+                "Embedding count mismatch: expected %d, got %d",
+                len(processed_inputs),
+                len(all_embeddings),
+            )
             return None
 
-        return [ rec.embedding for rec in response.data ]
+        return all_embeddings
 
     def construct_prompt(self, prompt: str, role: str):
         return {

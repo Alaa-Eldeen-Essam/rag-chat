@@ -1,10 +1,16 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import base, data, nlp, users, stats
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from routes import auth, base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
+from stores.llm.providers.RerankerProvider import RerankerProvider
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
+from stores.search import SearchProviderFactory
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from models.UserModel import UserModel
@@ -34,15 +40,37 @@ async def startup_span():
 
     llm_provider_factory = LLMProviderFactory(settings)
     vectordb_provider_factory = VectorDBProviderFactory(config=settings, db_client=app.db_client)
+    search_provider_factory = SearchProviderFactory(settings)
+
+    # Decide which engine's model IDs to use for generation based on the
+    # configured GENERATION_API_URL.
+    ollama_chat_url = (
+        getattr(settings, "OLLAMA_CHAT_API_URL", None)
+        or getattr(settings, "OLLAMA_API_URL", None)
+    )
+    use_ollama_for_gen = (
+        getattr(settings, "GENERATION_API_URL", None)
+        and ollama_chat_url
+        and settings.GENERATION_API_URL.strip() == ollama_chat_url.strip()
+    )
+
+    if use_ollama_for_gen:
+        base_generation_model_id = settings.OLLAMA_GENERATION_MODEL_ID
+        best_generation_model_id = settings.OLLAMA_BEST_GENERATION_MODEL_ID or base_generation_model_id
+        thinking_generation_model_id = settings.OLLAMA_THINKING_GENERATION_MODEL_ID
+        fast_generation_model_id = settings.OLLAMA_FAST_GENERATION_MODEL_ID
+    else:
+        base_generation_model_id = settings.VLLM_GENERATION_MODEL_ID
+        best_generation_model_id = settings.VLLM_BEST_GENERATION_MODEL_ID or base_generation_model_id
+        thinking_generation_model_id = settings.VLLM_THINKING_GENERATION_MODEL_ID
+        fast_generation_model_id = settings.VLLM_FAST_GENERATION_MODEL_ID
 
     generation_models = {
-        "best": settings.BEST_GENERATION_MODEL_ID or settings.GENERATION_MODEL_ID,
-        "thinking": settings.THINKING_GENERATION_MODEL_ID,
-        "fast": settings.FAST_GENERATION_MODEL_ID,
+        "best": best_generation_model_id,
+        "thinking": thinking_generation_model_id,
+        "fast": fast_generation_model_id,
     }
-    generation_models = {
-        key: value for key, value in generation_models.items() if value
-    }
+    generation_models = {key: value for key, value in generation_models.items() if value}
 
     if not generation_models:
         raise ValueError("No generation models configured. Please update environment variables.")
@@ -56,16 +84,34 @@ async def startup_span():
     app.generation_clients = {}
 
     for key, model_id in generation_models.items():
-        client = llm_provider_factory.create(provider=settings.GENERATION_BACKEND)
+        client = llm_provider_factory.create_generation_client()
         client.set_generation_model(model_id=model_id)
         app.generation_clients[key] = client
 
     app.generation_client = app.generation_clients[default_model_key]
 
     # embedding client
-    app.embedding_client = llm_provider_factory.create(provider=settings.EMBEDDING_BACKEND)
-    app.embedding_client.set_embedding_model(model_id=settings.EMBEDDING_MODEL_ID,
-                                             embedding_size=settings.EMBEDDING_MODEL_SIZE)
+    app.embedding_client = llm_provider_factory.create_embedding_client()
+    # Decide which engine's embedding model ID to use based on the configured EMBEDDING_API_URL.
+    ollama_embed_url = (
+        getattr(settings, "OLLAMA_EMBED_API_URL", None)
+        or getattr(settings, "OLLAMA_API_URL", None)
+    )
+    use_ollama_for_embed = (
+        getattr(settings, "EMBEDDING_API_URL", None)
+        and ollama_embed_url
+        and settings.EMBEDDING_API_URL.strip() == ollama_embed_url.strip()
+    )
+
+    if use_ollama_for_embed:
+        embedding_model_id = settings.OLLAMA_EMBEDDING_MODEL_ID
+    else:
+        embedding_model_id = settings.VLLM_EMBEDDING_MODEL_ID
+
+    app.embedding_client.set_embedding_model(
+        model_id=embedding_model_id,
+        embedding_size=settings.EMBEDDING_MODEL_SIZE,
+    )
     
     # vector db client
     app.vectordb_client = vectordb_provider_factory.create(
@@ -73,10 +119,32 @@ async def startup_span():
     )
     await app.vectordb_client.connect()
 
+    # search client (Elasticsearch)
+    app.search_client = search_provider_factory.create()
+    if app.search_client is not None:
+        await app.search_client.connect()
+
     app.template_parser = TemplateParser(
         language=settings.PRIMARY_LANG,
         default_language=settings.DEFAULT_LANG,
     )
+
+    app.reranker_client = None
+    app.reranker_max_candidates = settings.RERANKER_MAX_CANDIDATES or 0
+    reranker_api_url = settings.RERANKER_API_URL
+    if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
+        reranker_api_url = f"{settings.OLLAMA_RERANKER_API_URL.rstrip('/')}/rerank"
+
+    if (
+        getattr(settings, "RERANKER_ENABLED", False)
+        and reranker_api_url
+        and settings.RERANKER_MODEL_ID
+    ):
+        app.reranker_client = RerankerProvider(
+            api_url=reranker_api_url,
+            api_key=settings.RERANKER_API_KEY,
+            model_id=settings.RERANKER_MODEL_ID,
+        )
 
     user_model = await UserModel.create_instance(
         db_client=app.db_client
@@ -89,12 +157,38 @@ async def startup_span():
 async def shutdown_span():
     app.db_engine.dispose()
     await app.vectordb_client.disconnect()
+    search_client = getattr(app, "search_client", None)
+    if search_client is not None:
+        await search_client.disconnect()
 
 app.on_event("startup")(startup_span)
 app.on_event("shutdown")(shutdown_span)
 
 app.include_router(base.base_router)
+app.include_router(auth.auth_router)
 app.include_router(data.data_router)
 app.include_router(nlp.nlp_router)
 app.include_router(users.users_router)
 app.include_router(stats.stats_router)
+
+# --- Frontend static serving (built React app) ---
+# Support both local dev layout (src/main.py, frontend/dist at project root)
+# and Docker layout (/app/main.py, frontend/dist under /app).
+src_dir = Path(__file__).resolve().parent
+frontend_candidates = [
+    src_dir.parent / "frontend" / "dist",  # e.g. repo_root/frontend/dist
+    src_dir / "frontend" / "dist",         # e.g. /app/frontend/dist in Docker
+]
+
+frontend_dist_path = next((p for p in frontend_candidates if p.exists()), None)
+
+if frontend_dist_path is not None:
+    app.mount(
+        "/app",
+        StaticFiles(directory=str(frontend_dist_path), html=True),
+        name="frontend",
+    )
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/app")

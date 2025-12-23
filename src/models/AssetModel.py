@@ -22,25 +22,44 @@ class AssetModel(BaseDataModel):
                     asset.asset_document_type = "general"
                 else:
                     asset.asset_document_type = asset.asset_document_type.strip().lower()
+                # Normalize visibility
+                visibility = (getattr(asset, "asset_visibility", None) or "private").strip().lower()
+                if visibility not in ("private", "department", "global"):
+                    visibility = "private"
+                asset.asset_visibility = visibility
                 session.add(asset)
             await session.commit()
             await session.refresh(asset)
         return asset
 
     def _can_user_access(self, asset: Asset, current_user) -> bool:
-        if asset.asset_is_private is False:
-            return True
-
         if current_user is None:
             return False
 
         if getattr(current_user, "is_admin", False):
             return True
 
-        if asset.asset_user_id is None:
+        # Owner always has access
+        if asset.asset_user_id == getattr(current_user, "id", None):
             return True
 
-        return asset.asset_user_id == getattr(current_user, "id", None)
+        visibility = getattr(asset, "asset_visibility", None) or (
+            "private" if getattr(asset, "asset_is_private", True) else "global"
+        )
+        visibility = visibility.lower()
+        asset_dept = getattr(asset, "asset_department", None)
+        user_dept = getattr(current_user, "department", None)
+
+        if visibility == "global":
+            return True
+        if visibility == "department" and asset_dept and user_dept:
+            if isinstance(asset_dept, list):
+                return user_dept in asset_dept
+            elif isinstance(asset_dept, str):
+                return user_dept == asset_dept
+
+        # default / private
+        return False
 
     async def get_all_project_assets(self, asset_project_id: int, asset_type: str, current_user):
 
@@ -50,16 +69,23 @@ class AssetModel(BaseDataModel):
                 Asset.asset_type == asset_type
             )
 
-            if current_user and not getattr(current_user, "is_admin", False):
-                stmt = stmt.where(
-                    or_(
-                        Asset.asset_is_private.is_(False),
-                        Asset.asset_user_id == getattr(current_user, "id", None)
-                    )
-                )
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+
+        if current_user and not getattr(current_user, "is_admin", False):
+            return [a for a in records if self._can_user_access(a, current_user)]
+        return records
+
+    async def get_all_accessible_assets(self, asset_type: str, current_user):
+
+        async with self.db_client() as session:
+            stmt = select(Asset).where(Asset.asset_type == asset_type)
 
             result = await session.execute(stmt)
             records = result.scalars().all()
+
+        if current_user and not getattr(current_user, "is_admin", False):
+            return [a for a in records if self._can_user_access(a, current_user)]
         return records
 
     async def get_asset_record(self, asset_project_id: int, asset_name: str, current_user):
@@ -98,3 +124,51 @@ class AssetModel(BaseDataModel):
             async with session.begin():
                 await session.delete(asset)
             await session.commit()
+
+    def _normalize_departments(self, departments):
+        if not departments:
+            return []
+        normalized = []
+        seen = set()
+        for entry in departments:
+            if not entry:
+                continue
+            value = str(entry).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        return normalized
+
+    async def set_asset_departments(self, asset_id: int, departments):
+        normalized = self._normalize_departments(departments)
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    Asset.__table__.update()
+                    .where(Asset.asset_id == asset_id)
+                    .values(asset_department=normalized or None)
+                )
+            await session.commit()
+        return normalized
+
+    async def update_visibility(self, asset_id: int, visibility: str):
+        vis = (visibility or "private").strip().lower()
+        if vis not in ("private", "department", "global"):
+            vis = "private"
+        is_private = vis == "private"
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    Asset.__table__.update()
+                    .where(Asset.asset_id == asset_id)
+                    .values(
+                        asset_visibility=vis,
+                        asset_is_private=is_private,
+                    )
+                )
+            await session.commit()
+        return vis, is_private
