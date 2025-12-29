@@ -452,6 +452,7 @@ def run_benchmark(
     context_key: Optional[str] = None,
     answer_key: Optional[str] = None,
     passage_id_key: Optional[str] = None,
+    include_sample_metrics: bool = False,
 ) -> Dict[str, Any]:
     headers = build_auth_headers(token, basic_user, basic_pass)
     if bypass_header and bypass_value:
@@ -510,6 +511,7 @@ def run_benchmark(
     generation_em = []
     generation_f1 = []
     skipped = 0
+    sample_metrics: Optional[Dict[str, Any]] = None
 
     total_eval = len(indices)
     for offset, idx in enumerate(indices, start=1):
@@ -555,10 +557,30 @@ def run_benchmark(
             retrieval_id_scores.append(id_recall)
             retrieval_id_mrr.append(id_mrr)
             retrieval_id_precision.append(id_precision)
+            if include_sample_metrics and sample_metrics is None:
+                sample_metrics = {
+                    "sample_index": idx,
+                    "question": str(question),
+                    "passage_id": passage_id,
+                    "overlap_recall_at_k": recall,
+                    "overlap_mrr_at_k": mrr,
+                    "overlap_precision_at_k": precision,
+                    "passage_id_recall_at_k": id_recall,
+                    "passage_id_mrr_at_k": id_mrr,
+                    "passage_id_precision_at_k": id_precision,
+                    "top_k": top_k,
+                }
         if eval_mode in {"generation", "both"}:
             em, f1 = compute_generation_metrics(answer_text, answers)
             generation_em.append(em)
             generation_f1.append(f1)
+            if include_sample_metrics and sample_metrics is None:
+                sample_metrics = {
+                    "sample_index": idx,
+                    "question": str(question),
+                    "exact_match": em,
+                    "token_f1": f1,
+                }
 
         time.sleep(0.05)
 
@@ -571,6 +593,7 @@ def run_benchmark(
         "doc_type": doc_type,
         "samples": len(indices),
         "skipped": skipped,
+        "sample": sample_metrics,
         "retrieval": None,
         "generation": None,
     }
@@ -606,6 +629,7 @@ def main() -> None:
     parser.add_argument("--context-key", default="")
     parser.add_argument("--answer-key", default="")
     parser.add_argument("--passage-id-key", default="")
+    parser.add_argument("--sample-metrics", action="store_true")
     parser.add_argument("--auth-token", default="")
     parser.add_argument("--basic-user", default="")
     parser.add_argument("--basic-pass", default="")
@@ -653,6 +677,7 @@ def main() -> None:
         context_key=args.context_key or None,
         answer_key=args.answer_key or None,
         passage_id_key=args.passage_id_key or None,
+        include_sample_metrics=args.sample_metrics,
     )
 
     print(json.dumps(results, ensure_ascii=False, indent=2))
