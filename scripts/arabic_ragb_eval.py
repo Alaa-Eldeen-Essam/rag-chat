@@ -615,6 +615,13 @@ def run_benchmark(
     return results
 
 
+def rating_label(value: float, thresholds: List[Tuple[float, str]]) -> str:
+    for threshold, label in thresholds:
+        if value >= threshold:
+            return label
+    return "Poor"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ArabicRAGB benchmark runner.")
     parser.add_argument("--dataset", default="HeshamHaroon/ArabicRAGB")
@@ -681,6 +688,32 @@ def main() -> None:
     )
 
     print(json.dumps(results, ensure_ascii=False, indent=2))
+
+    retrieval = results.get("retrieval") or {}
+    if retrieval:
+        top_k = retrieval.get("top_k", args.top_k)
+        recall = float(retrieval.get("overlap_recall_at_k", 0.0))
+        mrr = float(retrieval.get("overlap_mrr_at_k", 0.0))
+        precision = float(retrieval.get("overlap_precision_at_k", 0.0))
+
+        recall_label = rating_label(
+            recall,
+            [(0.9, "Very Good"), (0.8, "Good"), (0.65, "OK")],
+        )
+        mrr_label = rating_label(
+            mrr,
+            [(0.85, "Very Good"), (0.7, "Good"), (0.55, "OK")],
+        )
+        precision_label = rating_label(
+            precision,
+            [(0.6, "Very Good"), (0.45, "Good"), (0.3, "OK")],
+        )
+        print(
+            f"Rating summary (overlap@{top_k}): "
+            f"Recall@{top_k}: {recall_label}; "
+            f"MRR@{top_k}: {mrr_label}; "
+            f"Precision@{top_k}: {precision_label}"
+        )
     if args.output:
         output_path = Path(args.output)
         output_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
