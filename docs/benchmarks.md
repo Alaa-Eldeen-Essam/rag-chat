@@ -54,3 +54,32 @@ If you want passage-id matching, pass `--passage-id-key` (e.g. `passage_id`).
 The indexer will name files like `arabic_ragb_passage_{id}_*.txt` so that the
 retrieval scorer can match by id. If no passage id is available, the id metrics
 will stay at 0.0.
+
+python3 scripts/arabic_ragb_eval.py \
+  --build-index \
+  --doc-type arabic_ragb \
+  --basic-user admin \
+  --basic-pass admin123 \
+  --eval retrieval \
+  --question-key query \
+  --context-key passage_text \
+  --passage-id-key passage_id
+
+python3 scripts/arabic_ragb_eval.py \
+  --limit 0 \
+  --doc-type arabic_ragb \
+  --basic-user admin \
+  --basic-pass admin123 \
+  --eval retrieval \
+  --question-key query \
+  --context-key passage_text \
+  --passage-id-key passage_id
+
+python3 scripts/arabic_ragb_eval.py \
+  --doc-type arabic_ragb \
+  --basic-user admin \
+  --basic-pass admin123 \
+  --eval generation \
+  --question-key query \
+  --context-key passage_text \
+  --answer-key passage_text
