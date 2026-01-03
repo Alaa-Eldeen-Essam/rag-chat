@@ -14,7 +14,19 @@ class DataController(BaseController):
     def validate_uploaded_file(self, file: UploadFile):
 
         # Allow PDF, TXT, and common image types (for OCR).
-        allowed_exts = {".pdf", ".txt", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"}
+        allowed_exts = {
+            ".pdf",
+            ".txt",
+            ".doc",
+            ".docx",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".tif",
+            ".tiff",
+            ".bmp",
+            ".gif",
+        }
         fname = (file.filename or "").lower()
         ext_ok = any(fname.endswith(ext) for ext in allowed_exts)
 
@@ -25,6 +37,8 @@ class DataController(BaseController):
                 "application/pdf",
                 "application/x-pdf",
                 "text/plain",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "image/png",
                 "image/jpeg",
                 "image/tiff",

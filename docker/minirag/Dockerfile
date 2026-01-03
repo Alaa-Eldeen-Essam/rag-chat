@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y \
     libxslt1-dev \
     libffi-dev \
     curl \
+    antiword \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-ara \

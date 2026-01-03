@@ -1,8 +1,11 @@
 import os
 import re
+import shutil
+import subprocess
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Optional
+import logging
 
 from langchain_community.document_loaders import TextLoader
 
@@ -13,6 +16,8 @@ from helpers.ocr import (
     extract_pdf_pages_with_ocr,
 )
 from models import ProcessingEnum
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Document:
@@ -45,6 +50,61 @@ class ProcessController(BaseController):
             return None
 
         return None
+
+    def _extract_docx_text(self, file_path: str) -> Optional[str]:
+        try:
+            from docx import Document as DocxDocument
+        except Exception as exc:
+            logger.warning("python-docx not available for DOCX: %s", exc)
+            return None
+
+        try:
+            doc = DocxDocument(file_path)
+        except Exception as exc:
+            logger.warning("Failed to open DOCX '%s': %s", file_path, exc)
+            return None
+
+        parts: List[str] = []
+        for para in doc.paragraphs:
+            text = (para.text or "").strip()
+            if text:
+                parts.append(text)
+
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    cell_text = (cell.text or "").strip()
+                    if cell_text:
+                        parts.append(cell_text)
+
+        combined = "\n".join(parts).strip()
+        return combined or None
+
+    def _extract_doc_text(self, file_path: str) -> Optional[str]:
+        tool = shutil.which("antiword") or shutil.which("catdoc")
+        if not tool:
+            logger.warning(
+                "No DOC extractor found (antiword/catdoc). Install one to parse .doc files."
+            )
+            return None
+
+        try:
+            result = subprocess.run(
+                [tool, file_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("Failed to run DOC extractor '%s': %s", tool, exc)
+            return None
+
+        output = result.stdout or ""
+        text = output.strip()
+        if not text:
+            logger.warning("DOC extractor '%s' returned no text for '%s'", tool, file_path)
+            return None
+        return text
 
     def _should_fallback_to_ocr(self, docs: Optional[list]) -> bool:
         """
@@ -126,6 +186,34 @@ class ProcessController(BaseController):
                     )
                 )
             return docs
+
+        if file_ext == ProcessingEnum.DOCX.value:
+            text = self._extract_docx_text(file_path)
+            if not text:
+                return None
+            return [
+                Document(
+                    page_content=text,
+                    metadata={
+                        "page_number": 1,
+                        "file_type": "docx",
+                    },
+                )
+            ]
+
+        if file_ext == ProcessingEnum.DOC.value:
+            text = self._extract_doc_text(file_path)
+            if not text:
+                return None
+            return [
+                Document(
+                    page_content=text,
+                    metadata={
+                        "page_number": 1,
+                        "file_type": "doc",
+                    },
+                )
+            ]
 
         loader = self.get_file_loader(file_id=file_id)
         docs = loader.load() if loader else None
