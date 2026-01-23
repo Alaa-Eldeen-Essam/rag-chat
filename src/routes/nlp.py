@@ -888,6 +888,11 @@ async def answer_rag(
 
     collector = {"output": [], "reasoning": []} if search_request.stream else None
 
+    inferred_answer_style = nlp_controller._infer_answer_style(
+        search_request.text,
+        search_request.answer_style,
+    )
+
     def compose_collector_output(store: Optional[dict]) -> str:
         if not store:
             return ""
@@ -915,6 +920,7 @@ async def answer_rag(
             chat_messages=chat_messages,
             stream=bool(search_request.stream),
             collector=collector,
+            answer_style=inferred_answer_style,
         )
 
         if search_request.stream:
@@ -1195,6 +1201,8 @@ async def answer_rag(
             asset_labels=asset_label_lookup if asset_label_lookup else None,
             asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
             direct_hint=direct_hint,
+            answer_style=inferred_answer_style,
+            explain_retrieval=bool(search_request.explain_retrieval),
         )
 
     # Basic retrieval stats for later analytics
@@ -1236,8 +1244,8 @@ async def answer_rag(
             parts.append((getattr(doc, "text", "") or "").lower())
         evidence_corpus = " ".join(parts)
 
-    def build_sources(max_sources: int = 15) -> List[Dict[str, str]]:
-        sources: List[Dict[str, str]] = []
+    def build_sources(max_sources: int = 15) -> List[Dict[str, Any]]:
+        sources: List[Dict[str, Any]] = []
         # Deduplicate by chunk_id when available, instead of by (file, page).
         seen_ids: set[int] = set()
 
@@ -1259,6 +1267,12 @@ async def answer_rag(
                     meta_dict = {}
 
             asset_id_value = meta_dict.get("asset_id")
+            asset_id_int: Optional[int] = None
+            if asset_id_value is not None:
+                try:
+                    asset_id_int = int(asset_id_value)
+                except (TypeError, ValueError):
+                    asset_id_int = None
             file_name = (
                 meta_dict.get("original_filename")
                 or meta_dict.get("source_name")
@@ -1309,6 +1323,7 @@ async def answer_rag(
                     "page": page_no,
                     "excerpt_index": idx + 1,
                     "snippet": snippet,
+                    "asset_id": asset_id_int,
                 }
             )
 

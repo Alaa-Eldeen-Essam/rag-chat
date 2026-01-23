@@ -70,6 +70,17 @@ From the project root (where `src/main.py` lives):
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 5000
 ```
+mini-rag-app) alaa_eldeen@DESKTOP-7DLQCMS:/mnt/d/Behoos_AI/AI Projects/mini_rag/test_mini_rag/src$ ip route | grep default
+default via 172.23.112.1 dev eth0 proto kernel
+
+
+The chunk size/overlap you can change are passed from the API layer:
+
+Default values for uploads are in data.py (Form defaults):
+chunk_size and overlap_size defaults appear in the upload endpoints (e.g. chunk_size=400, overlap_size=50 and chunk_size=500, overlap_size=100 depending on route). Update those defaults if you want global behavior.
+The processing function itself defaults in ProcessController.py:
+process_file_content(..., chunk_size: int = 500, overlap_size: int = 100).
+
 
 Make sure your vector database and LLM backend (e.g. Ollama) are running and that the corresponding environment variables (`VECTOR_DB_BACKEND`, `GENERATION_BACKEND`, `OPENAI_API_URL`, `GENERATION_MODEL_ID`, etc.) are set.
 

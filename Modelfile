@@ -1,0 +1,6 @@
+FROM command-r7b-arabic:7b-02-2025-q8_0
+
+PARAMETER num_ctx 16384
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1

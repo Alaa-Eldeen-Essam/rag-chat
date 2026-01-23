@@ -65,6 +65,98 @@ class NLPController(BaseController):
         self.reranker_client = reranker_client
         self.reranker_max_candidates = reranker_max_candidates or 0
 
+    def _normalize_answer_style(self, style: Optional[str]) -> str:
+        normalized = (style or "").strip().lower()
+        if normalized in {"concise", "detailed", "balanced"}:
+            return normalized
+        return "concise"
+
+    def _infer_answer_style(self, query: Optional[str], explicit_style: Optional[str] = None) -> str:
+        """
+        Infer answer style from user question (Arabic + English hints).
+        Explicit style, if provided, wins; otherwise use heuristics.
+        """
+        if explicit_style:
+            return self._normalize_answer_style(explicit_style)
+
+        q = (query or "").strip().lower()
+        if not q:
+            return "balanced"
+
+        # English concise cues
+        concise_en = [
+            "short answer", "concise", "brief", "summary", "summarize", "tl;dr",
+            "in short", "quick answer", "quickly", "few words"
+        ]
+        # Arabic concise cues
+        concise_ar = [
+            "مختصر", "باختصار", "بإيجاز", "ملخص", "تلخيص", "خلاصة", "قصير", "إجابة قصيرة"
+        ]
+
+        # English detailed cues
+        detailed_en = [
+            "detailed", "in detail", "elaborate", "explain fully", "step by step",
+            "comprehensive", "long answer", "deep dive", "full explanation"
+        ]
+        # Arabic detailed cues
+        detailed_ar = [
+            "بالتفصيل", "تفصيلي", "اشرح", "شرح", "موسع", "مطول", "بتوسع", "كاملة", "تفاصيل"
+        ]
+
+        def any_in(tokens):
+            return any(tok in q for tok in tokens)
+
+        detailed_hit = any_in(detailed_en) or any_in(detailed_ar)
+        concise_hit = any_in(concise_en) or any_in(concise_ar)
+
+        if detailed_hit and not concise_hit:
+            return "detailed"
+        if concise_hit and not detailed_hit:
+            return "concise"
+        if detailed_hit and concise_hit:
+            return "balanced"
+        # Default neutral style
+        return "balanced"
+
+    def _build_style_directives(
+        self,
+        answer_style: Optional[str],
+        explain_retrieval: bool,
+        language: str,
+    ) -> tuple[str, str]:
+        """
+        Build bilingual (EN/AR) style hints that get injected into the prompts.
+        """
+        style = self._normalize_answer_style(answer_style)
+        lang = (language or "").lower()
+        is_ar = lang.startswith("ar")
+
+        if style == "detailed":
+            style_hint_en = "Detailed answer with clear structure; use bullet/numbered points when helpful."
+            style_hint_ar = "إجابة مفصلة ومنظمة؛ استخدم نقاطًا أو ترقيمًا عند الحاجة."
+        elif style == "balanced":
+            style_hint_en = "Balanced answer: a short summary followed by key details."
+            style_hint_ar = "إجابة متوازنة: ملخص قصير يتبعه أهم التفاصيل."
+        else:
+            style_hint_en = "Concise answer: keep it direct and short."
+            style_hint_ar = "إجابة موجزة: مختصرة ومباشرة."
+
+        explain_en = ""
+        explain_ar = ""
+        if explain_retrieval:
+            explain_en = "Start with a brief evidence recap (1-2 sentences) before the final answer."
+            explain_ar = "ابدأ بملخص قصير للأدلة (١-٢ جملة) قبل الإجابة النهائية."
+
+        style_instructions = style_hint_ar if is_ar else style_hint_en
+        if explain_retrieval:
+            style_instructions = f"{style_instructions} {explain_ar if is_ar else explain_en}".strip()
+
+        style_hint = style_hint_ar if is_ar else style_hint_en
+        if explain_retrieval:
+            style_hint = f"{style_hint} {'+ evidence recap first' if not is_ar else '+ ملخص أدلة أولاً'}"
+
+        return style_instructions, style_hint
+
     def create_collection_name(self, project_id: str):
         return f"collection_{self.vectordb_client.default_vector_size}_{project_id}".strip()
     
@@ -470,7 +562,17 @@ class NLPController(BaseController):
                     limit=limit
                 )
 
-        results = self._fuse_dense_and_lexical_results(results, lexical_results, limit)
+        dense_weight = getattr(self.app_settings, "RETRIEVAL_DENSE_WEIGHT", 0.6)
+        try:
+            dense_weight = float(dense_weight)
+        except (TypeError, ValueError):
+            dense_weight = 0.6
+        results = self._fuse_dense_and_lexical_results(
+            results,
+            lexical_results,
+            limit,
+            dense_weight=dense_weight,
+        )
         if not results:
             return []
 
@@ -854,10 +956,13 @@ class NLPController(BaseController):
                             doc_types: Optional[List[str]] = None,
                             asset_ids: Optional[List[int]] = None,
                             asset_labels: Optional[Dict[int, str]] = None,
-                            asset_labels_by_name: Optional[Dict[str, str]] = None):
+                            asset_labels_by_name: Optional[Dict[str, str]] = None,
+                            answer_style: Optional[str] = None,
+                            explain_retrieval: bool = False):
 
         question_type = self._detect_question_type(query)
         lowered_query = (query or "").lower()
+        inferred_style = self._infer_answer_style(query, answer_style)
 
         # Build an augmented retrieval query that incorporates recent
         # conversation turns (if any) so that follow-up questions using
@@ -967,6 +1072,8 @@ class NLPController(BaseController):
             asset_labels=asset_labels,
             asset_labels_by_name=asset_labels_by_name,
             direct_hint=direct_hint,
+            answer_style=inferred_style,
+            explain_retrieval=explain_retrieval,
         )
 
     async def generate_rag_answer_from_documents(self,
@@ -976,7 +1083,9 @@ class NLPController(BaseController):
                             stream: bool = False, collector: Optional[dict] = None,
                             asset_labels: Optional[Dict[int, str]] = None,
                             asset_labels_by_name: Optional[Dict[str, str]] = None,
-                            direct_hint: Optional[str] = None):
+                            direct_hint: Optional[str] = None,
+                            answer_style: Optional[str] = None,
+                            explain_retrieval: bool = False):
         
         answer_or_stream, full_prompt, chat_history = None, None, None
 
@@ -986,7 +1095,18 @@ class NLPController(BaseController):
         # step2: Select evidence documents and construct LLM prompt.
         # Use all retrieved documents (subject to the upstream `limit`)
         # so that the model can see the full evidence set.
-        system_prompt = self.template_parser.get("rag", "system_prompt")
+        template_language = getattr(self.template_parser, "language", "en")
+        style_instructions, style_hint = self._build_style_directives(
+            answer_style=answer_style,
+            explain_retrieval=explain_retrieval,
+            language=template_language,
+        )
+
+        system_prompt = self.template_parser.get(
+            "rag",
+            "system_prompt",
+            {"style_instructions": style_instructions},
+        )
 
         evidence_documents: List[Any] = list(retrieved_documents)
 
@@ -1016,7 +1136,8 @@ class NLPController(BaseController):
             documents_prompts = documents_prompts + "\n" + hint_section
 
         footer_prompt = self.template_parser.get("rag", "footer_prompt", {
-            "query": query
+            "query": query,
+            "style_hint": style_hint,
         })
 
         # step3: Construct Generation Client Prompts
@@ -1087,6 +1208,8 @@ class NLPController(BaseController):
         chat_messages: Optional[List[Dict[str, str]]] = None,
         stream: bool = False,
         collector: Optional[dict] = None,
+        answer_style: Optional[str] = None,
+        explain_retrieval: bool = False,  # unused here but kept for API symmetry
     ):
         """
         Generate a general (non-RAG) chat response that still respects the
@@ -1096,6 +1219,12 @@ class NLPController(BaseController):
         system_prompt = self.template_parser.get("chat", "system_prompt") or (
             "You are a concise, policy-compliant assistant. "
             "Answer helpfully, stay polite, and decline any unsafe requests."
+        )
+        template_language = getattr(self.template_parser, "language", "en")
+        _, style_hint = self._build_style_directives(
+            answer_style=answer_style,
+            explain_retrieval=False,
+            language=template_language,
         )
 
         chat_history = [
@@ -1122,10 +1251,19 @@ class NLPController(BaseController):
                         self.generation_client.construct_prompt(
                             prompt=answer_text,
                             role=self.generation_client.enums.ASSISTANT.value,
-                        )
                     )
+                )
 
-        final_prompt = self.generation_client.process_text(query or "")
+        style_prefix = ""
+        style_norm = self._normalize_answer_style(answer_style)
+        if style_norm == "detailed":
+            style_prefix = "Provide a detailed, well-structured answer. "
+        elif style_norm == "balanced":
+            style_prefix = "Provide a concise answer, then add key details. "
+        else:
+            style_prefix = "Keep the answer concise and direct. "
+
+        final_prompt = self.generation_client.process_text(f"{style_prefix}{query or ''}".strip())
         if stream:
             answer_stream = self.generation_client.generate_text_stream(
                 prompt=final_prompt,

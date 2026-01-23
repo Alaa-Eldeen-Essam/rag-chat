@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     FILE_ALLOWED_TYPES: list
     FILE_MAX_SIZE: int
     FILE_DEFAULT_CHUNK_SIZE: int
+    RAG_CHUNK_SIZE: int = 1000
+    RAG_CHUNK_OVERLAP: int = 100
 
     POSTGRES_USERNAME: str
     POSTGRES_PASSWORD: str
@@ -85,10 +87,17 @@ class Settings(BaseSettings):
 
     # Reranker
     RERANKER_ENABLED: bool = False
+    RERANKER_BACKEND: Optional[str] = None
     RERANKER_API_URL: Optional[str] = None
     RERANKER_API_KEY: Optional[str] = None
     RERANKER_MODEL_ID: Optional[str] = None
     RERANKER_MAX_CANDIDATES: int = 50
+    RERANKER_TIMEOUT: float = 30.0
+    OLLAMA_RERANKER_MODEL_ID: Optional[str] = None
+    OLLAMA_RERANKER_HOST: Optional[str] = None
+
+    # Retrieval weighting
+    RETRIEVAL_DENSE_WEIGHT: float = 0.6
 
     # Prompt guard
     PROMPT_GUARD_ENABLED: bool = True

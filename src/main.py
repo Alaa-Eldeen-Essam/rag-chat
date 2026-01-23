@@ -8,6 +8,7 @@ from routes import auth, base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.llm.providers.RerankerProvider import RerankerProvider
+from stores.llm.providers.OllamaCliRerankerProvider import OllamaCliRerankerProvider
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
 from stores.search import SearchProviderFactory
@@ -131,20 +132,38 @@ async def startup_span():
 
     app.reranker_client = None
     app.reranker_max_candidates = settings.RERANKER_MAX_CANDIDATES or 0
-    reranker_api_url = settings.RERANKER_API_URL
-    if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
-        reranker_api_url = f"{settings.OLLAMA_RERANKER_API_URL.rstrip('/')}/rerank"
+    reranker_backend = (getattr(settings, "RERANKER_BACKEND", None) or "").strip().lower()
 
-    if (
-        getattr(settings, "RERANKER_ENABLED", False)
-        and reranker_api_url
-        and settings.RERANKER_MODEL_ID
-    ):
-        app.reranker_client = RerankerProvider(
-            api_url=reranker_api_url,
-            api_key=settings.RERANKER_API_KEY,
-            model_id=settings.RERANKER_MODEL_ID,
-        )
+    if getattr(settings, "RERANKER_ENABLED", False):
+        if reranker_backend == "ollama_cli":
+            model_id = settings.OLLAMA_RERANKER_MODEL_ID or settings.RERANKER_MODEL_ID
+            ollama_host = settings.OLLAMA_RERANKER_HOST
+            if not ollama_host:
+                candidate_url = (
+                    getattr(settings, "OLLAMA_CHAT_API_URL", None)
+                    or getattr(settings, "OLLAMA_API_URL", None)
+                )
+                if candidate_url:
+                    ollama_host = candidate_url.rstrip("/")
+                    if ollama_host.endswith("/v1"):
+                        ollama_host = ollama_host[: -len("/v1")]
+            if model_id:
+                app.reranker_client = OllamaCliRerankerProvider(
+                    model_id=model_id,
+                    timeout=settings.RERANKER_TIMEOUT or 30.0,
+                    ollama_host=ollama_host,
+                )
+        else:
+            reranker_api_url = settings.RERANKER_API_URL
+            if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
+                reranker_api_url = f"{settings.OLLAMA_RERANKER_API_URL.rstrip('/')}/rerank"
+
+            if reranker_api_url and settings.RERANKER_MODEL_ID:
+                app.reranker_client = RerankerProvider(
+                    api_url=reranker_api_url,
+                    api_key=settings.RERANKER_API_KEY,
+                    model_id=settings.RERANKER_MODEL_ID,
+                )
 
     user_model = await UserModel.create_instance(
         db_client=app.db_client

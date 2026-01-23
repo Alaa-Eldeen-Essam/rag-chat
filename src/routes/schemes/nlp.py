@@ -15,6 +15,8 @@ class SearchRequest(BaseModel):
     asset_ids: Optional[List[int]] = None
     doc_type: Optional[str] = None
     mode: Optional[str] = "rag"
+    answer_style: Optional[str] = None  # optional hint; otherwise inferred from question
+    explain_retrieval: Optional[bool] = False
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None

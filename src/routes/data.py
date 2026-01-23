@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, UploadFile, status, Request, Form, Query, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import os
+import mimetypes
 from helpers.config import get_settings, Settings
 from helpers.assets import get_asset_display_name
 from controllers import DataController, ProjectController, ProcessController, NLPController
@@ -53,6 +54,19 @@ def normalize_department_list(values: Optional[List[str]]):
         seen.add(key)
         cleaned.append(value)
     return cleaned
+
+def resolve_chunk_settings(
+    app_settings: Settings,
+    chunk_size: int,
+    overlap_size: int,
+):
+    env_chunk_size = getattr(app_settings, "RAG_CHUNK_SIZE", None)
+    env_overlap = getattr(app_settings, "RAG_CHUNK_OVERLAP", None)
+    if env_chunk_size is not None:
+        chunk_size = int(env_chunk_size)
+    if env_overlap is not None:
+        overlap_size = int(env_overlap)
+    return chunk_size, overlap_size
 
 @data_router.post("/upload/{project_id}")
 async def upload_data(
@@ -180,9 +194,10 @@ async def upload_process_index(
     request: Request,
     project_id: int,
     file: UploadFile,
-    chunk_size: int = Form(400),
-    overlap_size: int = Form(50),
+    chunk_size: int = Form(1000),
+    overlap_size: int = Form(100),
     do_reset: int = Form(0),
+    force_ocr: bool = Form(False),
     is_private: bool = Form(True),
     doc_type: str = Form(DOCUMENT_TYPE_DEFAULT),
     visibility: str = Form("private"),
@@ -281,8 +296,17 @@ async def upload_process_index(
     )
     asset_record = await asset_model.create_asset(asset=asset_resource)
 
+    chunk_size, overlap_size = resolve_chunk_settings(
+        app_settings,
+        chunk_size,
+        overlap_size,
+    )
+
     process_controller = ProcessController(project_id=project_id)
-    file_content = process_controller.get_file_content(file_id=file_id)
+    file_content = process_controller.get_file_content(
+        file_id=file_id,
+        force_ocr=force_ocr,
+    )
 
     if file_content is None:
         logger.error("Error while processing uploaded file: %s", file_id)
@@ -392,6 +416,7 @@ async def upload_process_index_batch(
     chunk_size: int = Form(500),
     overlap_size: int = Form(100),
     do_reset: int = Form(0),
+    force_ocr: bool = Form(False),
     is_private: bool = Form(True),
     doc_type: str = Form(""),
     visibility: str = Form("private"),
@@ -461,6 +486,11 @@ async def upload_process_index_batch(
     normalized_doc_type = normalize_document_type(doc_type)
 
     results = []
+    chunk_size, overlap_size = resolve_chunk_settings(
+        app_settings,
+        chunk_size,
+        overlap_size,
+    )
 
     for upload_file in files:
         is_valid, result_signal = data_controller.validate_uploaded_file(
@@ -512,7 +542,10 @@ async def upload_process_index_batch(
         asset_record = await asset_model.create_asset(asset=asset_resource)
 
         process_controller = ProcessController(project_id=project_id)
-        file_content = process_controller.get_file_content(file_id=file_id)
+        file_content = process_controller.get_file_content(
+            file_id=file_id,
+            force_ocr=force_ocr,
+        )
 
         if file_content is None:
             logger.error("Error while processing uploaded file: %s", file_id)
@@ -631,10 +664,16 @@ async def process_endpoint(
     project_id: int,
     process_request: ProcessRequest,
     current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
 ):
 
     chunk_size = process_request.chunk_size
     overlap_size = process_request.overlap_size
+    chunk_size, overlap_size = resolve_chunk_settings(
+        app_settings,
+        chunk_size,
+        overlap_size,
+    )
     do_reset = process_request.do_reset
 
     project_model = await ProjectModel.create_instance(
@@ -864,6 +903,62 @@ async def list_assets(
             "assets": payload,
             "no_of_assets": len(payload),
         }
+    )
+
+@data_router.get("/assets/{asset_id}/file")
+async def get_asset_file(
+    request: Request,
+    asset_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    asset_model = await AssetModel.create_instance(
+        db_client=request.app.db_client
+    )
+    asset_record, exists_or_forbidden = await asset_model.get_asset_by_id(
+        asset_id=asset_id,
+        current_user=current_user,
+    )
+
+    if asset_record is None:
+        if exists_or_forbidden:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"signal": ResponseSignal.ACCESS_FORBIDDEN_ERROR.value},
+            )
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"signal": ResponseSignal.FILE_ID_ERROR.value},
+        )
+
+    safe_name = os.path.basename(getattr(asset_record, "asset_name", "") or "")
+    if not safe_name:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"signal": ResponseSignal.FILE_ID_ERROR.value},
+        )
+
+    project_path = ProjectController().get_project_path(
+        project_id=asset_record.asset_project_id
+    )
+    file_path = os.path.join(project_path, safe_name)
+
+    if not os.path.exists(file_path):
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "signal": ResponseSignal.FILE_ID_ERROR.value,
+                "detail": "File not found on disk.",
+            },
+        )
+
+    display_name = get_asset_display_name(asset_record) or safe_name
+    media_type, _ = mimetypes.guess_type(display_name)
+
+    return FileResponse(
+        file_path,
+        media_type=media_type or "application/octet-stream",
+        filename=display_name,
+        content_disposition_type="inline",
     )
     
 @data_router.delete("/assets/{asset_id}")

@@ -53,89 +53,89 @@ services:
     gpus: all
 
   # Dedicated Infinity instance for reranking
-  ollama_reranker:
-    image: michaelf34/infinity:latest
-    container_name: ollama_reranker
-    command: v2 --model-id $RERANKER_MODEL_ID --port 11434
-    env_file:
-      - ./env/.env.app
-    environment:
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
-    volumes:
-      - ollama_reranker_data:/app/.cache/huggingface
-    ports:
-      - "11435:11434"
-    networks:
-      - backend
-    restart: always
+  # ollama_reranker:
+  #   image: michaelf34/infinity:latest
+  #   container_name: ollama_reranker
+  #   command: v2 --model-id $RERANKER_MODEL_ID --port 11434
+  #   env_file:
+  #     - ./env/.env.app
+  #   environment:
+  #     - HF_TOKEN=${HF_TOKEN:-}
+  #     - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+  #   volumes:
+  #     - ollama_reranker_data:/app/.cache/huggingface
+  #   ports:
+  #     - "11435:11434"
+  #   networks:
+  #     - backend
+  #   restart: always
 
-  # vLLM Service for chat
-  vllm_chat:
-    image: vllm/vllm-openai:latest
-    container_name: vllm_chat
-    runtime: nvidia
-    ipc: host
-    command: >
-      --host 0.0.0.0
-      --port 8000
-      --model ${VLLM_CHAT_MODEL_NAME}
-      --gpu-memory-utilization 0.7
-      --max-model-len 2048
-    ports:
-      - "8000:8000"
-    volumes:
-      - vllm_models:/root/.cache/huggingface
-    env_file:
-      - ./env/.env.app
-    environment:
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
-    networks:
-      - backend
-    restart: always
-    gpus: all
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  # # vLLM Service for chat
+  # vllm_chat:
+  #   image: vllm/vllm-openai:latest
+  #   container_name: vllm_chat
+  #   runtime: nvidia
+  #   ipc: host
+  #   command: >
+  #     --host 0.0.0.0
+  #     --port 8000
+  #     --model ${VLLM_CHAT_MODEL_NAME}
+  #     --gpu-memory-utilization 0.7
+  #     --max-model-len 2048
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - vllm_models:/root/.cache/huggingface
+  #   env_file:
+  #     - ./env/.env.app
+  #   environment:
+  #     - HF_TOKEN=${HF_TOKEN:-}
+  #     - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+  #   networks:
+  #     - backend
+  #   restart: always
+  #   gpus: all
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
 
-  # vLLM Service for embeddings
-  vllm_embed:
-    image: vllm/vllm-openai:latest
-    container_name: vllm_embed
-    runtime: nvidia
-    ipc: host
-    command: >
-      --host 0.0.0.0
-      --port 8000
-      --model ${VLLM_EMBED_MODEL_NAME}
-      --task embed
-      --gpu-memory-utilization 0.3
-      --max-model-len 512
-    ports:
-      - "8001:8000"
-    volumes:
-      - vllm_models:/root/.cache/huggingface
-    env_file:
-      - ./env/.env.app
-    environment:
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
-    networks:
-      - backend
-    restart: always
-    gpus: all
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  # # vLLM Service for embeddings
+  # vllm_embed:
+  #   image: vllm/vllm-openai:latest
+  #   container_name: vllm_embed
+  #   runtime: nvidia
+  #   ipc: host
+  #   command: >
+  #     --host 0.0.0.0
+  #     --port 8000
+  #     --model ${VLLM_EMBED_MODEL_NAME}
+  #     --task embed
+  #     --gpu-memory-utilization 0.3
+  #     --max-model-len 512
+  #   ports:
+  #     - "8001:8000"
+  #   volumes:
+  #     - vllm_models:/root/.cache/huggingface
+  #   env_file:
+  #     - ./env/.env.app
+  #   environment:
+  #     - HF_TOKEN=${HF_TOKEN:-}
+  #     - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+  #   networks:
+  #     - backend
+  #   restart: always
+  #   gpus: all
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
 
   # Nginx reverse proxy
   nginx:
@@ -245,7 +245,7 @@ volumes:
   pgvector:
   ollama_chat_data:
   ollama_embed_data:
-  ollama_reranker_data:
+  # ollama_reranker_data:
   elasticsearch_data:
-  vllm_models:
+  # vllm_models:
   pgadmin_data:

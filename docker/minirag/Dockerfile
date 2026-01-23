@@ -36,6 +36,10 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr-ara \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Ollama CLI for local reranker execution.
+RUN curl -fsSL https://ollama.com/download/ollama-linux-amd64 -o /usr/local/bin/ollama \
+    && chmod +x /usr/local/bin/ollama
+
 COPY src/requirements.txt .
 
 RUN uv pip install -r requirements.txt --system

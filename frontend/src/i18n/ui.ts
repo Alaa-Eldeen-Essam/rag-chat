@@ -42,6 +42,7 @@ type Key =
   | 'dismiss'
   | 'of'
   | 'source'
+  | 'openFile'
   | 'excerpt'
   | 'friendlyServerIssue'
   | 'dateToday'
@@ -113,6 +114,8 @@ type Key =
   // Upload modal
   | 'uploadTitle'
   | 'selectFiles'
+  | 'forceOcr'
+  | 'forceOcrHint'
   | 'docTypePlaceholder'
   | 'docTypePlaceholderRequired'
   | 'docTypeRequired'
@@ -254,6 +257,7 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     dismiss: 'Dismiss',
     of: 'of',
     source: 'Source',
+    openFile: 'Open file',
     excerpt: 'Excerpt',
     friendlyServerIssue: "We're still tidying things up. Please try again shortly.",
     promptGuardBlocked: 'This request was blocked by the safety filter. Please ask directly about the documents.',
@@ -320,6 +324,8 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     totalAssetsLabel: 'Total assets',
     uploadTitle: 'Upload and Index Files',
     selectFiles: 'Select files',
+    forceOcr: 'Force OCR',
+    forceOcrHint: 'Run OCR for PDFs even when text is detected.',
     docTypePlaceholder: 'Or enter a new document type...',
     docTypePlaceholderRequired: 'Enter document type (required)...',
     docTypeRequired: 'Document type is required.',
@@ -458,6 +464,7 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     dismiss: 'إغلاق',
     of: 'من',
     source: 'مصدر',
+    openFile: 'فتح الملف',
     excerpt: 'مقتطف',
     friendlyServerIssue: 'نقوم بترتيب الأمور في الخلفية. يرجى المحاولة مرة أخرى بعد قليل.',
     promptGuardBlocked: 'تم حظر هذا الطلب من قبل الحماية. يرجى إعادة صياغته بدون محاولة تغيير تعليمات المساعد.',
@@ -524,6 +531,8 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     totalAssetsLabel: 'إجمالي الملفات',
     uploadTitle: 'رفع وفهرسة الملفات',
     selectFiles: 'اختر الملفات',
+    forceOcr: 'فرض OCR',
+    forceOcrHint: 'تشغيل OCR لملفات PDF حتى مع وجود نص.',
     docTypePlaceholder: 'أو أدخل نوع مستند جديد...',
     docTypePlaceholderRequired: 'أدخل نوع المستند (مطلوب)...',
     docTypeRequired: 'نوع المستند مطلوب.',

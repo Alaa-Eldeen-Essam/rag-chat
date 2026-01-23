@@ -200,6 +200,7 @@ def extract_pdf_pages_with_ocr(
     lang: str,
     max_pages: Optional[int] = None,
     dpi: int = 300,
+    force_ocr: bool = False,
 ) -> List[Tuple[str, Dict]]:
     """
     Extract PDF text page‑by‑page, falling back to OCR when needed.
@@ -211,7 +212,7 @@ def extract_pdf_pages_with_ocr(
     """
     results: List[Tuple[str, Dict]] = []
 
-    needs_ocr = requires_ocr_for_pdf(path)
+    needs_ocr = force_ocr or requires_ocr_for_pdf(path)
     if not needs_ocr:
         # Try to use the embedded text layer, per page.
         try:

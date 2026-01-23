@@ -92,15 +92,28 @@ class ProcessController(BaseController):
             result = subprocess.run(
                 [tool, file_path],
                 capture_output=True,
-                text=True,
                 check=False,
             )
         except Exception as exc:
             logger.warning("Failed to run DOC extractor '%s': %s", tool, exc)
             return None
 
-        output = result.stdout or ""
-        text = output.strip()
+        output_bytes = result.stdout or b""
+        if not output_bytes.strip():
+            logger.warning("DOC extractor '%s' returned no text for '%s'", tool, file_path)
+            return None
+
+        decoded = None
+        for encoding in ("utf-8", "cp1256", "windows-1256", "cp1252", "latin-1"):
+            try:
+                decoded = output_bytes.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if decoded is None:
+            decoded = output_bytes.decode("utf-8", errors="replace")
+
+        text = decoded.strip()
         if not text:
             logger.warning("DOC extractor '%s' returned no text for '%s'", tool, file_path)
             return None
@@ -149,7 +162,7 @@ class ProcessController(BaseController):
 
         return False
 
-    def get_file_content(self, file_id: str):
+    def get_file_content(self, file_id: str, force_ocr: bool = False):
         """
         Load file content as a list of Document‑like objects.
 
@@ -170,6 +183,7 @@ class ProcessController(BaseController):
                 lang=getattr(self.app_settings, "OCR_LANGS", "eng"),
                 max_pages=getattr(self.app_settings, "OCR_MAX_PAGES", None),
                 dpi=getattr(self.app_settings, "OCR_DPI", 300) or 300,
+                force_ocr=force_ocr,
             )
             if not pages:
                 return None
@@ -219,7 +233,7 @@ class ProcessController(BaseController):
         docs = loader.load() if loader else None
 
         # If OCR is disabled, keep existing behavior.
-        if not getattr(self.app_settings, "OCR_ENABLED", False):
+        if not getattr(self.app_settings, "OCR_ENABLED", False) and not force_ocr:
             # For images, there was no loader before, so we also keep behavior (no content).
             return docs
 

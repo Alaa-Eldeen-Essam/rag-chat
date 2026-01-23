@@ -21,6 +21,7 @@ interface MessageSource {
   page?: number;
   excerpt_index?: number;
   snippet?: string;
+  asset_id?: number;
 }
 
 interface GroupedSources {
@@ -75,7 +76,8 @@ export const ChatPage: React.FC = () => {
     chatMode,
     uiLanguage,
     docTypesVersion,
-    setSettings
+    setSettings,
+    apiBaseUrl
   } = useSettings();
   const { request } = useHttpClient();
   const { streamFetch } = useStreamClient();
@@ -133,6 +135,26 @@ export const ChatPage: React.FC = () => {
   const isRegularMode = chatMode === 'regular';
   const uiText = (key: Parameters<typeof t>[1]) => t(uiLanguage, key);
   const isRTL = uiLanguage === 'ar';
+  const buildResourceUrl = useCallback(
+    (src: MessageSource) => {
+      if (!apiBaseUrl) return null;
+      const rawId = src.asset_id;
+      const assetId =
+        typeof rawId === 'number' ? rawId : Number(rawId);
+      if (!Number.isFinite(assetId)) return null;
+      const base = apiBaseUrl.replace(/\/$/, '');
+      const fileName = (src.file_name || '').toLowerCase();
+      const isPdf = fileName.endsWith('.pdf');
+      const pageNo =
+        typeof src.page === 'number' ? src.page : Number(src.page);
+      const url = `${base}/api/v1/data/assets/${assetId}/file`;
+      if (isPdf && Number.isFinite(pageNo) && pageNo > 0) {
+        return `${url}#page=${pageNo}`;
+      }
+      return url;
+    },
+    [apiBaseUrl]
+  );
 
   const pinnedSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
 
@@ -975,7 +997,7 @@ export const ChatPage: React.FC = () => {
                         : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
                     }`}
                   >
-                    {uiLanguage === 'ar' ? 'وضع RAG' : 'RAG mode'}
+                    {uiLanguage === 'ar' ? 'وضع الملفات' : 'Files mode'}
                   </button>
                   <button
                     type="button"
@@ -1198,7 +1220,18 @@ export const ChatPage: React.FC = () => {
                       return (
                         <div className="pl-4 md:pl-10">
                           <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-4 py-3 text-[15px] text-slate-700 space-y-3">
-                            <div className={`flex flex-wrap items-center justify-between gap-2 ${isRTL ? 'text-right' : 'text-left'}`}>
+                            <div
+                              className={`flex flex-wrap items-center justify-between gap-2 cursor-pointer ${isRTL ? 'text-right' : 'text-left'}`}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => toggleResourcesForMessage(m.id)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  toggleResourcesForMessage(m.id);
+                                }
+                              }}
+                            >
                               <div className="flex items-center gap-3">
                                 <span className="font-semibold text-slate-900 text-base">
                                   {uiText('resources')} ({m.sources.length})
@@ -1208,10 +1241,8 @@ export const ChatPage: React.FC = () => {
                                 </span>
                               </div>
                               <div className="flex items-center gap-2 text-[11px]">
-                                <button
-                                  type="button"
+                                <span
                                   className="text-[11px] text-[color:var(--accent-strong)] underline hover:text-[color:var(--accent)]"
-                                  onClick={() => toggleResourcesForMessage(m.id)}
                                 >
                                   {isExpanded
                                     ? uiLanguage === 'ar'
@@ -1220,7 +1251,7 @@ export const ChatPage: React.FC = () => {
                                     : uiLanguage === 'ar'
                                     ? 'عرض'
                                     : 'Show'}
-                                </button>
+                                </span>
                               </div>
                             </div>
                             {isExpanded && (
@@ -1567,6 +1598,7 @@ export const ChatPage: React.FC = () => {
                     ? src.location
                     : `${uiText('excerpt')} ${idx + 1}`;
                 const snippet = src.snippet || '';
+                const resourceUrl = buildResourceUrl(src);
                 return (
                   <div
                     key={`${activeResourcePanel.messageId}-panel-${idx}`}
@@ -1581,6 +1613,16 @@ export const ChatPage: React.FC = () => {
                           {loc}
                         </span>
                       </div>
+                      {resourceUrl && (
+                        <a
+                          href={resourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] text-[color:var(--accent-strong)] underline hover:text-[color:var(--accent)]"
+                        >
+                          {uiText('openFile')}
+                        </a>
+                      )}
                     </div>
                     {snippet && (
                       <div className="mt-2 text-[14px] leading-relaxed text-slate-800 whitespace-pre-wrap">
