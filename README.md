@@ -47,6 +47,34 @@ $ cp .env.example .env
 
 Set your environment variables in the `.env` file. Like `OPENAI_API_KEY` value.
 
+### Multihop RAG mode
+- Defaults (override in `.env` or `src/.env.example`): `MULTIHOP_MAX_HOPS=2`, `MULTIHOP_PER_HOP_K=6`, `MULTIHOP_PER_HOP_EVIDENCE=3`, optional `MULTIHOP_TEMPERATURE`.
+- API sample (POST `/api/v1/nlp/index/answer/{project_id}`):
+  ```json
+  {
+    "text": "Question that needs multi-step reasoning",
+    "mode": "multihop",
+    "doc_type": "general",
+    "multihop_hops": 2,
+    "multihop_k": 6,
+    "multihop_per_hop_evidence": 3
+  }
+  ```
+- Use the “Multihop RAG” mode toggle in the UI to send these parameters.
+- Example curl:
+  ```bash
+  curl -X POST http://localhost:5000/api/v1/nlp/index/answer/1 \
+    -H "Content-Type: application/json" \
+    -d '{
+      "text": "What did the committee decide and when was it announced?",
+      "mode": "multihop",
+      "doc_type": "general",
+      "multihop_hops": 2,
+      "multihop_k": 6,
+      "multihop_per_hop_evidence": 3
+    }'
+  ```
+
 ## Run Docker Compose Services
 
 ```bash

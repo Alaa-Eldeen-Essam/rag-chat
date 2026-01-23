@@ -17,6 +17,11 @@ class SearchRequest(BaseModel):
     mode: Optional[str] = "rag"
     answer_style: Optional[str] = None  # optional hint; otherwise inferred from question
     explain_retrieval: Optional[bool] = False
+    # Multihop options (used when mode="multihop")
+    multihop_hops: Optional[int] = None
+    multihop_k: Optional[int] = None
+    multihop_per_hop_evidence: Optional[int] = None
+    multihop_temperature: Optional[float] = None
 
 class SummarizeRequest(BaseModel):
     file_id: Optional[str] = None

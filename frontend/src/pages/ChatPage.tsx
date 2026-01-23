@@ -125,6 +125,7 @@ export const ChatPage: React.FC = () => {
   const [conversationPage, setConversationPage] = useState(1);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [docTypeError, setDocTypeError] = useState<string | null>(null);
+  const [modeError, setModeError] = useState<string | null>(null);
   const [promptGuardMessage, setPromptGuardMessage] = useState<string | null>(null);
   const MODE_INFO_KEY = 'chat_regular_mode_info_shown';
   const [hasSeenRegularInfo, setHasSeenRegularInfo] = useState<boolean>(() => {
@@ -133,6 +134,10 @@ export const ChatPage: React.FC = () => {
   });
   const [showRegularInfoBanner, setShowRegularInfoBanner] = useState(false);
   const isRegularMode = chatMode === 'regular';
+  const isMultihopMode = chatMode === 'multihop';
+  const [multihopHops, setMultihopHops] = useState<number>(2);
+  const [multihopK, setMultihopK] = useState<number>(6);
+  const [multihopEvidence, setMultihopEvidence] = useState<number>(3);
   const uiText = (key: Parameters<typeof t>[1]) => t(uiLanguage, key);
   const isRTL = uiLanguage === 'ar';
   const buildResourceUrl = useCallback(
@@ -490,7 +495,7 @@ export const ChatPage: React.FC = () => {
     }));
   };
 
-  const handleModeChange = (nextMode: 'rag' | 'regular') => {
+  const handleModeChange = (nextMode: 'rag' | 'regular' | 'multihop') => {
     if (nextMode === chatMode) return;
     if (isStreaming) {
       setIsStreaming(false);
@@ -526,11 +531,13 @@ export const ChatPage: React.FC = () => {
     if (!input.trim() || isStreaming) return;
     const modeForRequest = chatMode;
     const sendingRegular = modeForRequest === 'regular';
+    const sendingMultihop = modeForRequest === 'multihop';
     if (!sendingRegular && (!currentDocType || currentDocType.trim() === '')) {
       setDocTypeError(uiText('selectDocTypeFirst'));
       return;
     }
     setDocTypeError(null);
+    setModeError(null);
     const userText = input.trim();
     setInput('');
 
@@ -558,6 +565,24 @@ export const ChatPage: React.FC = () => {
       if (assetFilterIds && assetFilterIds.length > 0) {
         requestBody.asset_ids = assetFilterIds;
       }
+    }
+    if (sendingMultihop) {
+      // Client-side validation to surface friendly errors early.
+      if (
+        multihopHops < 1 ||
+        multihopHops > 5 ||
+        multihopK < 1 ||
+        multihopK > 20 ||
+        multihopEvidence < 1 ||
+        multihopEvidence > multihopK
+      ) {
+        setModeError(uiText('multihopParamError'));
+        setIsStreaming(false);
+        return;
+      }
+      requestBody.multihop_hops = multihopHops;
+      requestBody.multihop_k = multihopK;
+      requestBody.multihop_per_hop_evidence = multihopEvidence;
     }
 
     await streamFetch(
@@ -986,31 +1011,43 @@ export const ChatPage: React.FC = () => {
                 {uiText('chat')}
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span>{uiLanguage === 'ar' ? 'الوضع' : 'Mode'}:</span>
-                <div className="inline-flex items-center rounded-full border border-[color:var(--border-subtle)] bg-white p-1">
+                <span>{uiText('mode')}:</span>
+                <div className="inline-flex items-center rounded-full border border-[color:var(--border-subtle)] bg-white p-1 flex-wrap gap-1">
                   <button
                     type="button"
                     onClick={() => handleModeChange('rag')}
                     className={`px-3 py-1 text-[11px] rounded-full ${
-                      !isRegularMode
+                      chatMode === 'rag'
                         ? 'bg-[color:var(--accent)] text-white shadow'
                         : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
                     }`}
                   >
-                    {uiLanguage === 'ar' ? 'وضع الملفات' : 'Files mode'}
+                    {uiText('filesMode')}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleModeChange('regular')}
                     className={`px-3 py-1 text-[11px] rounded-full ${
-                      isRegularMode
+                      chatMode === 'regular'
                         ? 'bg-[color:var(--accent)] text-white shadow'
                         : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
                     }`}
                   >
-                    {uiLanguage === 'ar' ? 'دردشة عادية' : 'Regular chat'}
+                    {uiText('regularChat')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange('multihop')}
+                    className={`px-3 py-1 text-[11px] rounded-full ${
+                      chatMode === 'multihop'
+                        ? 'bg-[color:var(--accent)] text-white shadow'
+                        : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
+                    }`}
+                  >
+                    {uiText('multihopRag')}
                   </button>
                 </div>
+              </div>
               </div>
             </div>
             {!isRegularMode && (
@@ -1034,6 +1071,54 @@ export const ChatPage: React.FC = () => {
                 </select>
               </div>
             )}
+            {isMultihopMode && (
+              <div
+                className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500"
+                title={uiText('multihopHelp')}
+              >
+                <label className="flex items-center gap-1">
+                  <span>{uiText('multihopHops')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={multihopHops}
+                    onChange={e => setMultihopHops(Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
+                    className="w-14 rounded-full border border-[color:var(--border-subtle)] px-2 py-1 text-[11px]"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span>{uiText('multihopTopK')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={multihopK}
+                    onChange={e => setMultihopK(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                    className="w-14 rounded-full border border-[color:var(--border-subtle)] px-2 py-1 text-[11px]"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span>{uiText('multihopEvidence')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={multihopEvidence}
+                    onChange={e => setMultihopEvidence(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                    className="w-16 rounded-full border border-[color:var(--border-subtle)] px-2 py-1 text-[11px]"
+                  />
+                </label>
+                <div className="w-full text-[11px] text-slate-400">
+                  {uiText('multihopHelp')}
+                </div>
+                {modeError && (
+                  <div className="text-[11px] text-red-500 font-medium w-full">
+                    {modeError}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1054,9 +1139,7 @@ export const ChatPage: React.FC = () => {
           </div>
           {showRegularInfoBanner && isRegularMode && (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-[11px] text-amber-800">
-              {uiLanguage === 'ar'
-                ? 'وضع الدردشة العادية يستخدم نموذجاً عاماً ولا يمكنه الوصول إلى المستندات.'
-                : 'Regular chat uses a general AI model and cannot access your documents.'}
+              {uiText('regularInfo')}
             </div>
           )}
           {!isRegularMode && (

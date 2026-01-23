@@ -17,7 +17,7 @@ export interface SettingsState {
   rememberPassword: boolean;
   defaultModel: ModelKind;
   currentDocType: string;
-  chatMode: 'rag' | 'regular';
+  chatMode: 'rag' | 'regular' | 'multihop';
   currentUserId: number | null;
   currentUserIsAdmin: boolean;
   docTypesVersion: number;
@@ -100,7 +100,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({
         const storedPass = window.localStorage.getItem(PASSWORD_KEY) ?? '';
         base.basicAuthPass = storedPass;
       }
-      if (parsed.chatMode !== 'regular' && parsed.chatMode !== 'rag') {
+      if (parsed.chatMode !== 'regular' && parsed.chatMode !== 'rag' && parsed.chatMode !== 'multihop') {
         base.chatMode = defaultState.chatMode;
       }
       if (

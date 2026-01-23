@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
 
 from .BaseController import BaseController
 from models.db_schemes import DataChunk, Project, RetrievedDocument
@@ -1076,6 +1077,150 @@ class NLPController(BaseController):
             explain_retrieval=explain_retrieval,
         )
 
+    async def generate_multihop_rag_answer(
+        self,
+        project: Project,
+        query: str,
+        chat_messages: Optional[List[Dict[str, str]]] = None,
+        stream: bool = False,
+        collector: Optional[dict] = None,
+        doc_types: Optional[List[str]] = None,
+        asset_ids: Optional[List[int]] = None,
+        max_hops: int = 2,
+        per_hop_k: int = 6,
+        per_hop_evidence: int = 3,
+        generation_temperature: Optional[float] = None,
+        answer_style: Optional[str] = None,
+    ):
+        """
+        Multihop RAG: iterative retrieval + hop summaries feeding the next hop.
+        Reranker is intentionally bypassed by default to keep hops fast.
+        """
+        max_hops = max(1, min(max_hops or 2, 5))
+        per_hop_k = max(1, min(per_hop_k or 6, 20))
+        per_hop_evidence = max(1, min(per_hop_evidence or 3, per_hop_k))
+        inferred_style = self._infer_answer_style(query, answer_style)
+
+        template_language = getattr(self.template_parser, "language", "en")
+        style_instructions, style_hint = self._build_style_directives(
+            answer_style=inferred_style,
+            explain_retrieval=False,
+            language=template_language,
+        )
+        system_prompt = self.template_parser.get(
+            "multihop",
+            "system_prompt",
+            {"style_instructions": style_instructions},
+        )
+
+        hop_notes: List[str] = []
+        aggregated_evidence: List[Any] = []
+
+        for hop_idx in range(max_hops):
+            retrieval_text_parts: List[str] = []
+            if chat_messages:
+                for msg in chat_messages[-3:]:
+                    prompt_part = (msg.get("prompt") or "").strip()
+                    answer_part = (msg.get("answer") or "").strip()
+                    if prompt_part:
+                        retrieval_text_parts.append(prompt_part)
+                    if answer_part:
+                        retrieval_text_parts.append(answer_part)
+            retrieval_text_parts.append(query or "")
+            if hop_notes:
+                retrieval_text_parts.append(" ".join(hop_notes[-2:]))
+            retrieval_text = "\n".join(retrieval_text_parts[-4:]).strip()
+
+            retrieved = await self.search_vector_db_collection(
+                project=project,
+                text=retrieval_text,
+                limit=per_hop_k,
+                doc_types=doc_types,
+                asset_ids=asset_ids,
+            )
+
+            if not retrieved:
+                break
+
+            top_evidence = list(retrieved[:per_hop_evidence])
+            aggregated_evidence.extend(top_evidence)
+
+            # Build a short hop summary using the LLM to keep next hop focused.
+            snippets: List[str] = []
+            for doc in top_evidence:
+                txt = (getattr(doc, "text", "") or "").strip()
+                if txt:
+                    snippets.append(txt[:700])
+            evidence_text = "\n\n".join(snippets)
+
+            hop_summary_prompt = self.template_parser.get(
+                "multihop",
+                "hop_summary_prompt",
+                {
+                    "hop_index": hop_idx + 1,
+                    "query": query,
+                    "evidence_text": evidence_text,
+                },
+            )
+
+            hop_history = [
+                self.generation_client.construct_prompt(
+                    prompt=system_prompt,
+                    role=self.generation_client.enums.SYSTEM.value,
+                )
+            ]
+
+            hop_summary = self.generation_client.generate_text(
+                prompt=hop_summary_prompt,
+                chat_history=hop_history,
+                temperature=generation_temperature if generation_temperature is not None else 0.0,
+            )
+
+            hop_summary = (hop_summary or "").strip()
+            if hop_summary:
+                hop_notes.append(hop_summary)
+            else:
+                # If summarization failed, still proceed to next hop with existing notes.
+                hop_notes.append("")
+
+            # Simple early stop: if the summary contains an explicit answer cue.
+            if any(trigger in hop_summary.lower() for trigger in ["answer:", "الجواب", "الإجابة"]):
+                break
+
+        # Aggregate final evidence: top collected chunks plus hop notes as pseudo-documents.
+        pseudo_docs: List[Any] = []
+        for idx, note in enumerate(hop_notes):
+            if not note:
+                continue
+            pseudo_docs.append(
+                SimpleNamespace(
+                    text=note,
+                    metadata={"doc_label": f"Hop {idx + 1} summary"},
+                )
+            )
+
+        final_docs = list(aggregated_evidence) + pseudo_docs
+
+        # Fallback: if nothing collected, return None
+        if not final_docs:
+            return None, None, None, []
+
+        # Reuse RAG answering with accumulated evidence.
+        answer_result, full_prompt, chat_history = await self.generate_rag_answer_from_documents(
+            retrieved_documents=final_docs,
+            query=query,
+            chat_messages=chat_messages,
+            stream=stream,
+            collector=collector,
+            asset_labels=None,
+            asset_labels_by_name=None,
+            direct_hint=None,
+            answer_style=inferred_style,
+            explain_retrieval=False,
+            template_group="multihop",
+        )
+
+        return answer_result, full_prompt, chat_history, final_docs
     async def generate_rag_answer_from_documents(self,
                             retrieved_documents: List[Any],
                             query: str,
@@ -1085,7 +1230,8 @@ class NLPController(BaseController):
                             asset_labels_by_name: Optional[Dict[str, str]] = None,
                             direct_hint: Optional[str] = None,
                             answer_style: Optional[str] = None,
-                            explain_retrieval: bool = False):
+                            explain_retrieval: bool = False,
+                            template_group: str = "rag"):
         
         answer_or_stream, full_prompt, chat_history = None, None, None
 
@@ -1103,7 +1249,7 @@ class NLPController(BaseController):
         )
 
         system_prompt = self.template_parser.get(
-            "rag",
+            template_group,
             "system_prompt",
             {"style_instructions": style_instructions},
         )
@@ -1119,7 +1265,7 @@ class NLPController(BaseController):
                 asset_labels=asset_labels,
                 asset_labels_by_name=asset_labels_by_name,
             )
-            section = self.template_parser.get("rag", "document_prompt", {
+            section = self.template_parser.get(template_group, "document_prompt", {
                     "doc_label": doc_label,
                     "chunk_text": chunk_text,
             }) or f"## Document: {doc_label}\n### Content: {chunk_text}"
@@ -1129,13 +1275,13 @@ class NLPController(BaseController):
 
         hint_section = ""
         if direct_hint:
-            hint_section = self.template_parser.get("rag", "hint_section", {
+            hint_section = self.template_parser.get(template_group, "hint_section", {
                 "hint": direct_hint,
             }) or ("\n\n# Direct candidate answer extracted from documents:\n"
                    f"{direct_hint}\n")
             documents_prompts = documents_prompts + "\n" + hint_section
 
-        footer_prompt = self.template_parser.get("rag", "footer_prompt", {
+        footer_prompt = self.template_parser.get(template_group, "footer_prompt", {
             "query": query,
             "style_hint": style_hint,
         })

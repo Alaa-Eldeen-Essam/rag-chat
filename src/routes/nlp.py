@@ -692,7 +692,7 @@ async def answer_rag(
     )
 
     requested_mode = (search_request.mode or "rag").strip().lower()
-    if requested_mode not in {"rag", "regular"}:
+    if requested_mode not in {"rag", "regular", "multihop"}:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
@@ -701,6 +701,7 @@ async def answer_rag(
             }
         )
     is_regular_mode = requested_mode == "regular"
+    is_multihop_mode = requested_mode == "multihop"
     history_mode_tag = f"mode:{requested_mode}"
 
     asset_model = None
@@ -1192,18 +1193,72 @@ async def answer_rag(
         else:
             answer_result = f"{prefix_en}this occurred on {direct_hint}."
     else:
-        answer_result, full_prompt, chat_history = await nlp_controller.generate_rag_answer_from_documents(
-            retrieved_documents=retrieved_documents,
-            query=search_request.text,
-            chat_messages=chat_messages,
-            stream=bool(search_request.stream),
-            collector=collector,
-            asset_labels=asset_label_lookup if asset_label_lookup else None,
-            asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
-            direct_hint=direct_hint,
-            answer_style=inferred_answer_style,
-            explain_retrieval=bool(search_request.explain_retrieval),
-        )
+        if is_multihop_mode:
+            # Multihop defaults
+            max_hops = (
+                search_request.multihop_hops
+                or getattr(app_settings, "MULTIHOP_MAX_HOPS", 2)
+                or 2
+            )
+            per_hop_k = (
+                search_request.multihop_k
+                or getattr(app_settings, "MULTIHOP_PER_HOP_K", 6)
+                or 6
+            )
+            per_hop_evidence = (
+                search_request.multihop_per_hop_evidence
+                or getattr(app_settings, "MULTIHOP_PER_HOP_EVIDENCE", 3)
+                or 3
+            )
+            multihop_temp = (
+                search_request.multihop_temperature
+                if search_request.multihop_temperature is not None
+                else getattr(app_settings, "MULTIHOP_TEMPERATURE", None)
+            )
+            # Validate ranges before calling controller to surface friendly errors.
+            if max_hops < 1 or max_hops > 5 or per_hop_k < 1 or per_hop_k > 20 or per_hop_evidence < 1:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                        "detail": "Invalid multihop parameters. Use hops 1-5, top_k 1-20, evidence >=1."
+                    },
+                )
+            if per_hop_evidence > per_hop_k:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                        "detail": "Multihop evidence per hop must be <= top_k."
+                    },
+                )
+            answer_result, full_prompt, chat_history, retrieved_documents = await nlp_controller.generate_multihop_rag_answer(
+                project=project,
+                query=search_request.text,
+                chat_messages=chat_messages,
+                stream=bool(search_request.stream),
+                collector=collector,
+                doc_types=doc_type_filter,
+                asset_ids=list(accessible_asset_ids) if accessible_asset_ids else None,
+                max_hops=max_hops,
+                per_hop_k=per_hop_k,
+                per_hop_evidence=per_hop_evidence,
+                generation_temperature=multihop_temp,
+                answer_style=inferred_answer_style,
+            )
+        else:
+            answer_result, full_prompt, chat_history = await nlp_controller.generate_rag_answer_from_documents(
+                retrieved_documents=retrieved_documents,
+                query=search_request.text,
+                chat_messages=chat_messages,
+                stream=bool(search_request.stream),
+                collector=collector,
+                asset_labels=asset_label_lookup if asset_label_lookup else None,
+                asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+                direct_hint=direct_hint,
+                answer_style=inferred_answer_style,
+                explain_retrieval=bool(search_request.explain_retrieval),
+            )
 
     # Basic retrieval stats for later analytics
     retrieved_chunks_count = len(retrieved_documents) if retrieved_documents else 0

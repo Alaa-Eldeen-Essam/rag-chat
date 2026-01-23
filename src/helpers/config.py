@@ -99,6 +99,12 @@ class Settings(BaseSettings):
     # Retrieval weighting
     RETRIEVAL_DENSE_WEIGHT: float = 0.6
 
+    # Multihop RAG defaults
+    MULTIHOP_MAX_HOPS: int = 2
+    MULTIHOP_PER_HOP_K: int = 6
+    MULTIHOP_PER_HOP_EVIDENCE: int = 3
+    MULTIHOP_TEMPERATURE: Optional[float] = None
+
     # Prompt guard
     PROMPT_GUARD_ENABLED: bool = True
     PROMPT_GUARD_PYTECTOR: bool = False
