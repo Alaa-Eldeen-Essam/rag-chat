@@ -1049,7 +1049,6 @@ export const ChatPage: React.FC = () => {
                 </div>
               </div>
               </div>
-            </div>
             {!isRegularMode && (
               <div className="flex flex-col gap-1 text-xs text-slate-500">
                 <span>{uiText('docType')}:</span>
@@ -1144,7 +1143,7 @@ export const ChatPage: React.FC = () => {
           )}
           {!isRegularMode && (
             <div className={`relative flex flex-wrap items-center gap-3 ${isRTL ? 'flex-row-reverse' : ''}`}>
-            <button
+              <button
               type="button"
               className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-subtle)] bg-white px-4 py-2 text-[12px] text-slate-700 hover:border-[color:var(--accent)]"
               onClick={() => setFileDropdownOpen(prev => !prev)}
