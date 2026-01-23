@@ -9,6 +9,7 @@ from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.llm.providers.RerankerProvider import RerankerProvider
 from stores.llm.providers.OllamaCliRerankerProvider import OllamaCliRerankerProvider
+from stores.llm.providers.CrossEncoderRerankerProvider import CrossEncoderRerankerProvider
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
 from stores.search import SearchProviderFactory
@@ -153,6 +154,17 @@ async def startup_span():
                     timeout=settings.RERANKER_TIMEOUT or 30.0,
                     ollama_host=ollama_host,
                 )
+        elif reranker_backend == "cross_encoder":
+            model_id = settings.RERANKER_MODEL_ID or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            fallback_model_id = getattr(settings, "RERANKER_FALLBACK_MODEL_ID", None) or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            try:
+                app.reranker_client = CrossEncoderRerankerProvider(
+                    model_id=model_id,
+                    fallback_model_id=fallback_model_id,
+                )
+            except Exception as exc:
+                logger.error("Failed to load cross-encoder reranker: %s", exc)
+                app.reranker_client = None
         else:
             reranker_api_url = settings.RERANKER_API_URL
             if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
