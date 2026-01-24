@@ -44,6 +44,11 @@ def detect_language_or_default(text: str, default: str) -> str:
     if re.search(r"[\u0600-\u06FF]", text):
         return "ar"
 
+    # If the text contains Latin letters, prefer English to avoid
+    # langdetect misclassifying short English prompts as Arabic.
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+
     try:
         lang = detect(text)
     except LangDetectException:

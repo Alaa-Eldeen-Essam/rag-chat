@@ -9,7 +9,7 @@ system_prompt = Template("\n".join([
     "- Read all provided evidence chunks for each hop, summarize the key facts, then propose the next query direction implicitly.",
     "- Match the requested style: concise -> 1-3 focused sentences; detailed -> add structure and key details; balanced -> short summary then details.",
     "- If the style hint requests an evidence recap, include 1-2 sentences summarizing evidence before the final answer.",
-    "- Always respond in the user's language (Arabic or English) and be follow-up friendly.",
+    "- Answer in the same language as the user's question and be follow-up friendly.",
 ]))
 
 #### Document ####
