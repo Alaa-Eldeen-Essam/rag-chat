@@ -182,6 +182,85 @@ class NlpControllerDelegationTests(unittest.TestCase):
         self.assertEqual(captured.get("query"), "when")
         self.assertEqual(captured.get("template_group"), "rag")
 
+    def test_answer_rag_question_delegates(self):
+        controller = self._controller()
+        captured = {}
+
+        async def fake(self_obj, **kwargs):
+            captured.update(kwargs)
+            return ("answer", None, None, {"answer_confidence": 1.0})
+
+        old = MODULE.orchestrate_answer_rag_question
+        MODULE.orchestrate_answer_rag_question = fake
+        try:
+            result = asyncio.run(
+                controller.answer_rag_question(
+                    project=SimpleNamespace(project_id=9),
+                    query="when",
+                    limit=4,
+                )
+            )
+        finally:
+            MODULE.orchestrate_answer_rag_question = old
+
+        self.assertEqual(result[0], "answer")
+        self.assertEqual(captured.get("query"), "when")
+        self.assertEqual(captured.get("limit"), 4)
+
+    def test_index_into_vector_db_delegates(self):
+        controller = self._controller()
+        captured = {}
+
+        async def fake(self_obj, **kwargs):
+            captured.update(kwargs)
+            return True
+
+        old = MODULE.orchestrate_index_into_vector_db
+        MODULE.orchestrate_index_into_vector_db = fake
+        try:
+            result = asyncio.run(
+                controller.index_into_vector_db(
+                    project=SimpleNamespace(project_id=3),
+                    chunks=[],
+                    chunks_ids=[],
+                    do_reset=True,
+                )
+            )
+        finally:
+            MODULE.orchestrate_index_into_vector_db = old
+
+        self.assertTrue(result)
+        self.assertEqual(captured.get("do_reset"), True)
+
+    def test_style_helper_delegates(self):
+        controller = self._controller()
+        old = MODULE.orchestrate_infer_answer_style
+        MODULE.orchestrate_infer_answer_style = (
+            lambda _self, query, explicit_style=None: f"{query}|{explicit_style or ''}"
+        )
+        try:
+            result = controller._infer_answer_style("q", explicit_style="balanced")
+        finally:
+            MODULE.orchestrate_infer_answer_style = old
+
+        self.assertEqual(result, "q|balanced")
+
+    def test_label_resolution_delegates(self):
+        controller = self._controller()
+        old = MODULE.orchestrate_resolve_document_label
+        MODULE.orchestrate_resolve_document_label = (
+            lambda _self, metadata, fallback_label, asset_labels=None, asset_labels_by_name=None, asset_id_hint=None: "DocX"
+        )
+        try:
+            result = controller._resolve_document_label(
+                metadata={"asset_id": 1},
+                fallback_label="fallback",
+            )
+        finally:
+            MODULE.orchestrate_resolve_document_label = old
+
+        self.assertEqual(result, "DocX")
+
 
 if __name__ == "__main__":
     unittest.main()

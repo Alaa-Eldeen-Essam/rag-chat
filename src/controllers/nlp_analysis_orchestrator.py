@@ -9,6 +9,73 @@ EVIDENCE_DOC_LIMIT = 5
 EVIDENCE_CHAR_BUDGET = 4000
 
 
+def coerce_metadata_dict(metadata: Optional[Any]) -> Optional[Dict[str, Any]]:
+    if isinstance(metadata, dict):
+        return metadata
+    if metadata is None:
+        return None
+
+    if hasattr(metadata, "dict"):
+        try:
+            meta_dict = metadata.dict()  # type: ignore[call-arg]
+            if isinstance(meta_dict, dict):
+                return meta_dict
+        except Exception:
+            pass
+
+    if hasattr(metadata, "__dict__"):
+        meta_dict = getattr(metadata, "__dict__", None)
+        if isinstance(meta_dict, dict):
+            return meta_dict
+
+    return None
+
+
+def normalize_label_value(value: str) -> str:
+    label = (value or "").strip()
+    if not label:
+        return ""
+    normalized = label.replace("\\", "/")
+    if "/" in normalized:
+        normalized = normalized.split("/")[-1]
+    return normalized
+
+
+def resolve_document_label(
+    controller,
+    metadata: Optional[Any],
+    fallback_label: str,
+    asset_labels: Optional[Dict[int, str]] = None,
+    asset_labels_by_name: Optional[Dict[str, str]] = None,
+    asset_id_hint: Optional[int] = None,
+) -> str:
+    metadata_dict = coerce_metadata_dict(metadata)
+
+    candidate_asset_id = asset_id_hint
+    if candidate_asset_id is None and metadata_dict:
+        candidate_asset_id = metadata_dict.get("asset_id")
+
+    if asset_labels and candidate_asset_id is not None:
+        try:
+            label = asset_labels.get(int(candidate_asset_id))
+        except (ValueError, TypeError):
+            label = None
+        if label:
+            return normalize_label_value(label)
+
+    if metadata_dict:
+        for key in ("source_name", "original_filename", "original_name", "filename", "name", "source"):
+            value = metadata_dict.get(key)
+            if isinstance(value, str):
+                cleaned = normalize_label_value(value)
+                if cleaned:
+                    if asset_labels_by_name and cleaned in asset_labels_by_name:
+                        return asset_labels_by_name[cleaned]
+                    return cleaned
+
+    return normalize_label_value(fallback_label)
+
+
 def default_answer_metadata(controller) -> Dict[str, Any]:
     return {
         "needs_clarification": False,

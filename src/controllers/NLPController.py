@@ -1,8 +1,4 @@
-import json
-import logging
-import re
 import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from .BaseController import BaseController
@@ -11,6 +7,7 @@ from .nlp_analysis_orchestrator import (
     apply_ambiguity_gate as orchestrate_apply_ambiguity_gate,
     build_evidence_summary as orchestrate_build_evidence_summary,
     build_heuristic_analysis as orchestrate_build_heuristic_analysis,
+    coerce_metadata_dict as orchestrate_coerce_metadata_dict,
     compact_clarification_option as orchestrate_compact_clarification_option,
     default_answer_metadata as orchestrate_default_answer_metadata,
     derive_clarification_option as orchestrate_derive_clarification_option,
@@ -18,6 +15,11 @@ from .nlp_analysis_orchestrator import (
     extract_json_object as orchestrate_extract_json_object,
     has_key_value_conflict as orchestrate_has_key_value_conflict,
     normalize_analysis_payload as orchestrate_normalize_analysis_payload,
+    normalize_label_value as orchestrate_normalize_label_value,
+    resolve_document_label as orchestrate_resolve_document_label,
+)
+from .nlp_answer_flow_orchestrator import (
+    answer_rag_question as orchestrate_answer_rag_question,
 )
 from .nlp_direct_answer_orchestrator import (
     detect_question_type as orchestrate_detect_question_type,
@@ -28,6 +30,12 @@ from .nlp_generation_orchestrator import (
     generate_rag_answer_from_documents as orchestrate_generate_rag_answer_from_documents,
     generate_regular_chat_response as orchestrate_generate_regular_chat_response,
     summarize_chunks as orchestrate_summarize_chunks,
+)
+from .nlp_indexing_orchestrator import (
+    create_collection_name as orchestrate_create_collection_name,
+    get_vector_db_collection_info as orchestrate_get_vector_db_collection_info,
+    index_into_vector_db as orchestrate_index_into_vector_db,
+    reset_vector_db_collection as orchestrate_reset_vector_db_collection,
 )
 from .nlp_retrieval_orchestrator import (
     build_conversation_context as orchestrate_build_conversation_context,
@@ -41,43 +49,13 @@ from .nlp_retrieval_orchestrator import (
     rerank_documents as orchestrate_rerank_documents,
     search_vector_db_collection as orchestrate_search_vector_db_collection,
 )
+from .nlp_style_orchestrator import (
+    build_style_directives as orchestrate_build_style_directives,
+    infer_answer_style as orchestrate_infer_answer_style,
+    normalize_answer_style as orchestrate_normalize_answer_style,
+)
 from models.db_schemes import DataChunk, Project, RetrievedDocument
-from stores.llm.LLMEnums import DocumentTypeEnum
 
-logger = logging.getLogger(__name__)
-
-# Basic Arabic month names for simple date extraction.
-AR_MONTHS_PATTERN = (
-    "يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|"
-    "أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر"
-)
-
-# Basic English month names for simple date extraction.
-EN_MONTHS_PATTERN = (
-    "January|February|March|April|May|June|July|August|September|October|November|December|"
-    "Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
-)
-
-# Match patterns like:
-# - "2 ديسمبر 2021"
-# - "2\nديسمبر2021"
-# - "December 2, 2021"
-# - "2 December 2021"
-DATE_REGEX = re.compile(
-    rf"("
-    rf"\d{{1,2}}\D{{0,7}}(?:{AR_MONTHS_PATTERN}|{EN_MONTHS_PATTERN})\D{{0,7}}\d{{4}}"
-    rf"|"
-    rf"(?:{AR_MONTHS_PATTERN}|{EN_MONTHS_PATTERN})\D{{0,7}}\d{{4}}"
-    rf")"
-)
-
-# Maximum number of evidence chunks to send to the LLM for a single answer.
-EVIDENCE_DOC_LIMIT = 5
-
-# Approximate character budget for all evidence text passed to the LLM for
-# a single answer. This helps keep prompts focused and reduces hallucination
-# risk on very long documents.
-EVIDENCE_CHAR_BUDGET = 4000
 
 class NLPController(BaseController):
 
@@ -142,57 +120,10 @@ class NLPController(BaseController):
             }
 
     def _normalize_answer_style(self, style: Optional[str]) -> str:
-        normalized = (style or "").strip().lower()
-        if normalized in {"concise", "detailed", "balanced"}:
-            return normalized
-        return "concise"
+        return orchestrate_normalize_answer_style(style)
 
     def _infer_answer_style(self, query: Optional[str], explicit_style: Optional[str] = None) -> str:
-        """
-        Infer answer style from user question (Arabic + English hints).
-        Explicit style, if provided, wins; otherwise use heuristics.
-        """
-        if explicit_style:
-            return self._normalize_answer_style(explicit_style)
-
-        q = (query or "").strip().lower()
-        if not q:
-            return "balanced"
-
-        # English concise cues
-        concise_en = [
-            "short answer", "concise", "brief", "summary", "summarize", "tl;dr",
-            "in short", "quick answer", "quickly", "few words"
-        ]
-        # Arabic concise cues
-        concise_ar = [
-            "مختصر", "باختصار", "بإيجاز", "ملخص", "تلخيص", "خلاصة", "قصير", "إجابة قصيرة"
-        ]
-
-        # English detailed cues
-        detailed_en = [
-            "detailed", "in detail", "elaborate", "explain fully", "step by step",
-            "comprehensive", "long answer", "deep dive", "full explanation"
-        ]
-        # Arabic detailed cues
-        detailed_ar = [
-            "بالتفصيل", "تفصيلي", "اشرح", "شرح", "موسع", "مطول", "بتوسع", "كاملة", "تفاصيل"
-        ]
-
-        def any_in(tokens):
-            return any(tok in q for tok in tokens)
-
-        detailed_hit = any_in(detailed_en) or any_in(detailed_ar)
-        concise_hit = any_in(concise_en) or any_in(concise_ar)
-
-        if detailed_hit and not concise_hit:
-            return "detailed"
-        if concise_hit and not detailed_hit:
-            return "concise"
-        if detailed_hit and concise_hit:
-            return "balanced"
-        # Default neutral style
-        return "balanced"
+        return orchestrate_infer_answer_style(self, query=query, explicit_style=explicit_style)
 
     def _build_style_directives(
         self,
@@ -200,86 +131,30 @@ class NLPController(BaseController):
         explain_retrieval: bool,
         language: str,
     ) -> tuple[str, str]:
-        """
-        Build bilingual (EN/AR) style hints that get injected into the prompts.
-        """
-        style = self._normalize_answer_style(answer_style)
-        lang = (language or "").lower()
-        is_ar = lang.startswith("ar")
-
-        if style == "detailed":
-            style_hint_en = "Detailed answer with clear structure; use bullet/numbered points when helpful."
-            style_hint_ar = "إجابة مفصلة ومنظمة؛ استخدم نقاطًا أو ترقيمًا عند الحاجة."
-        elif style == "balanced":
-            style_hint_en = "Balanced answer: a short summary followed by key details."
-            style_hint_ar = "إجابة متوازنة: ملخص قصير يتبعه أهم التفاصيل."
-        else:
-            style_hint_en = "Concise answer: keep it direct and short."
-            style_hint_ar = "إجابة موجزة: مختصرة ومباشرة."
-
-        explain_en = ""
-        explain_ar = ""
-        if explain_retrieval:
-            explain_en = "Start with a brief evidence recap (1-2 sentences) before the final answer."
-            explain_ar = "ابدأ بملخص قصير للأدلة (١-٢ جملة) قبل الإجابة النهائية."
-
-        style_instructions = style_hint_ar if is_ar else style_hint_en
-        if explain_retrieval:
-            style_instructions = f"{style_instructions} {explain_ar if is_ar else explain_en}".strip()
-
-        style_hint = style_hint_ar if is_ar else style_hint_en
-        if explain_retrieval:
-            style_hint = f"{style_hint} {'+ evidence recap first' if not is_ar else '+ ملخص أدلة أولاً'}"
-
-        return style_instructions, style_hint
-
-    def create_collection_name(self, project_id: str):
-        return f"collection_{self.vectordb_client.default_vector_size}_{project_id}".strip()
-    
-    async def reset_vector_db_collection(self, project: Project):
-        collection_name = self.create_collection_name(project_id=project.project_id)
-        return await self.vectordb_client.delete_collection(collection_name=collection_name)
-    
-    async def get_vector_db_collection_info(self, project: Project):
-        collection_name = self.create_collection_name(project_id=project.project_id)
-        collection_info = await self.vectordb_client.get_collection_info(collection_name=collection_name)
-
-        return json.loads(
-            json.dumps(collection_info, default=lambda x: x.__dict__)
+        return orchestrate_build_style_directives(
+            self,
+            answer_style=answer_style,
+            explain_retrieval=explain_retrieval,
+            language=language,
         )
 
+    def create_collection_name(self, project_id: str):
+        return orchestrate_create_collection_name(self, project_id=project_id)
+
+    async def reset_vector_db_collection(self, project: Project):
+        return await orchestrate_reset_vector_db_collection(self, project=project)
+
+    async def get_vector_db_collection_info(self, project: Project):
+        return await orchestrate_get_vector_db_collection_info(self, project=project)
+
     def _coerce_metadata_dict(self, metadata: Optional[Any]) -> Optional[Dict[str, Any]]:
-        if isinstance(metadata, dict):
-            return metadata
-        if metadata is None:
-            return None
-
-        if hasattr(metadata, "dict"):
-            try:
-                meta_dict = metadata.dict()  # type: ignore[call-arg]
-                if isinstance(meta_dict, dict):
-                    return meta_dict
-            except Exception:
-                pass
-
-        if hasattr(metadata, "__dict__"):
-            meta_dict = getattr(metadata, "__dict__", None)
-            if isinstance(meta_dict, dict):
-                return meta_dict
-
-        return None
+        return orchestrate_coerce_metadata_dict(metadata)
 
     def _detect_question_type(self, query: str) -> str:
         return orchestrate_detect_question_type(query)
 
     def _normalize_label_value(self, value: str) -> str:
-        label = (value or "").strip()
-        if not label:
-            return ""
-        normalized = label.replace("\\", "/")
-        if "/" in normalized:
-            normalized = normalized.split("/")[-1]
-        return normalized
+        return orchestrate_normalize_label_value(value)
 
     def _resolve_document_label(
         self,
@@ -289,31 +164,14 @@ class NLPController(BaseController):
         asset_labels_by_name: Optional[Dict[str, str]] = None,
         asset_id_hint: Optional[int] = None,
     ) -> str:
-        metadata_dict = self._coerce_metadata_dict(metadata)
-
-        candidate_asset_id = asset_id_hint
-        if candidate_asset_id is None and metadata_dict:
-            candidate_asset_id = metadata_dict.get("asset_id")
-
-        if asset_labels and candidate_asset_id is not None:
-            try:
-                label = asset_labels.get(int(candidate_asset_id))
-            except (ValueError, TypeError):
-                label = None
-            if label:
-                return self._normalize_label_value(label)
-
-        if metadata_dict:
-            for key in ("source_name", "original_filename", "original_name", "filename", "name", "source"):
-                value = metadata_dict.get(key)
-                if isinstance(value, str):
-                    cleaned = self._normalize_label_value(value)
-                    if cleaned:
-                        if asset_labels_by_name and cleaned in asset_labels_by_name:
-                            return asset_labels_by_name[cleaned]
-                        return cleaned
-
-        return self._normalize_label_value(fallback_label)
+        return orchestrate_resolve_document_label(
+            self,
+            metadata=metadata,
+            fallback_label=fallback_label,
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
+            asset_id_hint=asset_id_hint,
+        )
 
     def _build_lexical_query(self, text: str) -> str:
         return orchestrate_build_lexical_query(text)
@@ -479,73 +337,13 @@ class NLPController(BaseController):
         chunks_ids: List[int],
         do_reset: bool = False,
     ):
-
-        # step1: get collection name
-        collection_name = self.create_collection_name(project_id=project.project_id)
-
-        # step2: manage items
-        texts = [c.chunk_text for c in chunks]
-        metadata = [c.chunk_metadata for c in chunks]
-        vectors = self.embedding_client.embed_text(
-            text=texts,
-            document_type=DocumentTypeEnum.DOCUMENT.value,
-        )
-
-        if not vectors or len(vectors) != len(texts):
-            logger.error("Embedding client returned invalid vectors for indexing")
-            return False
-
-        # step3: create collection if not exists
-        _ = await self.vectordb_client.create_collection(
-            collection_name=collection_name,
-            embedding_size=self.embedding_client.embedding_size,
+        return await orchestrate_index_into_vector_db(
+            self,
+            project=project,
+            chunks=chunks,
+            chunks_ids=chunks_ids,
             do_reset=do_reset,
         )
-
-        # step4: insert into vector db
-        _ = await self.vectordb_client.insert_many(
-            collection_name=collection_name,
-            texts=texts,
-            metadata=metadata,
-            vectors=vectors,
-            record_ids=chunks_ids,
-        )
-
-        # step5: index into search backend (Elasticsearch) when available
-        if self.search_client is not None:
-            try:
-                index_name = self.search_client.get_index_name(project.project_id)
-                documents = []
-                for chunk in chunks:
-                    meta = chunk.chunk_metadata or {}
-                    page_value = meta.get("page") or meta.get("page_number")
-                    original_filename = (
-                        meta.get("original_filename")
-                        or meta.get("source_name")
-                        or ""
-                    )
-                    doc = {
-                        "chunk_id": getattr(chunk, "chunk_id", None),
-                        "project_id": getattr(chunk, "chunk_project_id", None),
-                        "asset_id": getattr(chunk, "chunk_asset_id", None),
-                        "doc_type": meta.get("doc_type") or meta.get("document_type"),
-                        "text": chunk.chunk_text,
-                        "page": page_value,
-                        "page_number": page_value,
-                        "original_filename": original_filename,
-                        "metadata": meta,
-                    }
-                    documents.append(doc)
-
-                if documents:
-                    await self.search_client.index_documents(
-                        index_name=index_name,
-                        documents=documents,
-                    )
-            except Exception as exc:
-                logger.error("Failed to index chunks into search backend: %s", exc)
-
-        return True
 
     async def search_vector_db_collection(
         self,
@@ -585,122 +383,19 @@ class NLPController(BaseController):
                             asset_labels_by_name: Optional[Dict[str, str]] = None,
                             answer_style: Optional[str] = None,
                             explain_retrieval: bool = False):
-
-        question_type = self._detect_question_type(query)
-        lowered_query = (query or "").lower()
-        inferred_style = self._infer_answer_style(query, answer_style)
-
-        # Build an augmented retrieval query that incorporates recent
-        # conversation turns (if any) so that follow-up questions using
-        # pronouns like "هناك / there" still retrieve the right chunks.
-        retrieval_text = query or ""
-        if chat_messages:
-            parts: List[str] = []
-            for msg in chat_messages[-3:]:
-                prompt_part = (msg.get("prompt") or "").strip()
-                answer_part = (msg.get("answer") or "").strip()
-                if prompt_part:
-                    parts.append(prompt_part)
-                if answer_part:
-                    parts.append(answer_part)
-            if parts:
-                retrieval_text = "\n".join(parts + [query or ""])
-        
-        # step1: retrieve related documents
-        retrieved_documents = await self.search_vector_db_collection(
+        return await orchestrate_answer_rag_question(
+            self,
             project=project,
-            text=retrieval_text,
+            query=query,
             limit=limit,
-            doc_types=doc_types,
-            asset_ids=asset_ids,
-        )
-
-        # ------------------------------------------------------------------
-        # Guardrail: for questions explicitly about "شيوع اللحن بين العرب"
-        # (e.g. "متى شاع اللحن بين العرب؟"), require that at least one of
-        # the retrieved chunks actually contains both "اللحن" and "العرب".
-        # If no such chunk exists, short‑circuit with a deterministic
-        # fallback answer instead of allowing the model to hallucinate a
-        # time based only on partial context (e.g. generic dates in the
-        # document about العربية الفصحى).
-        # ------------------------------------------------------------------
-        if "اللحن" in lowered_query and "العرب" in lowered_query:
-            has_supporting_chunk = False
-            for doc in retrieved_documents or []:
-                text_value = getattr(doc, "text", "") or ""
-                t_low = text_value.lower()
-                if "اللحن" in t_low and "العرب" in t_low:
-                    has_supporting_chunk = True
-                    break
-
-            if not has_supporting_chunk:
-                fallback_answer = (
-                    "لا يمكن تحديد متى شاع اللحن بين العرب من المستندات المفهرسة الحالية."
-                )
-                return fallback_answer, None, None
-
-        direct_hint = self._try_extract_direct_answer(
-            query=query,
-            documents=retrieved_documents or [],
-            question_type=question_type,
-        )
-
-        # Try to resolve a human-readable label for the document that most
-        # likely contains the direct hint (e.g., original filename), so that
-        # we can say "according to <document>" instead of "according to the
-        # documents" in deterministic answers.
-        doc_label_for_hint: Optional[str] = None
-        if direct_hint and retrieved_documents:
-            chosen_doc = None
-            for doc in retrieved_documents:
-                text_value = getattr(doc, "text", "") or ""
-                if direct_hint in text_value:
-                    chosen_doc = doc
-                    break
-            if chosen_doc is None:
-                chosen_doc = retrieved_documents[0]
-
-            try:
-                doc_label_for_hint = self._resolve_document_label(
-                    getattr(chosen_doc, "metadata", None),
-                    fallback_label="Document 1",
-                )
-            except Exception:
-                doc_label_for_hint = None
-
-        # For clear "when / متى" questions where we can reliably extract a
-        # concrete date from the retrieved documents, short-circuit and answer
-        # directly rather than delegating to the LLM. This ensures deterministic
-        # behavior even when conversation history might bias the model toward
-        # "unknown" answers. For "why" questions we prefer to pass the hint into
-        # the LLM so it can clean up / enrich the answer.
-        if direct_hint and question_type == "when":
-            has_arabic = bool(re.search(r"[\u0600-\u06FF]", query or ""))
-            if doc_label_for_hint:
-                prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
-                prefix_en = f'According to the document "{doc_label_for_hint}", '
-            else:
-                prefix_ar = "وفقاً للمستندات، "
-                prefix_en = "According to the documents, "
-
-            if has_arabic:
-                answer_text = f"{prefix_ar}كان ذلك في {direct_hint}."
-            else:
-                answer_text = f"{prefix_en}this occurred on {direct_hint}."
-            metadata = self._default_answer_metadata()
-            metadata["answer_confidence"] = 1.0
-            return answer_text, None, None, metadata
-
-        return await self.generate_rag_answer_from_documents(
-            retrieved_documents=retrieved_documents or [],
-            query=query,
             chat_messages=chat_messages,
             stream=stream,
             collector=collector,
+            doc_types=doc_types,
+            asset_ids=asset_ids,
             asset_labels=asset_labels,
             asset_labels_by_name=asset_labels_by_name,
-            direct_hint=direct_hint,
-            answer_style=inferred_style,
+            answer_style=answer_style,
             explain_retrieval=explain_retrieval,
         )
 
@@ -795,7 +490,7 @@ class NLPController(BaseController):
             answer_style=answer_style,
             explain_retrieval=explain_retrieval,
         )
-    
+
     def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
                          max_output_tokens: Optional[int] = None,
                          asset_labels: Optional[Dict[int, str]] = None,

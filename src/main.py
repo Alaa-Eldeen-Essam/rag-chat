@@ -188,7 +188,7 @@ async def startup_span():
     )    
 
 async def shutdown_span():
-    app.db_engine.dispose()
+    await app.db_engine.dispose()
     await app.vectordb_client.disconnect()
     search_client = getattr(app, "search_client", None)
     if search_client is not None:
