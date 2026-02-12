@@ -1292,6 +1292,8 @@ export const ChatPage: React.FC = () => {
                           content={m.content}
                           isStreaming={isStreaming && m.role === 'assistant'}
                           onCopy={() => {}}
+                          renderAsMarkdown={m.role === 'assistant'}
+                          copyMode={m.role === 'assistant' ? 'plain_text' : 'raw_markdown'}
                         />
                   {!isRegularMode &&
                     m.role === 'assistant' &&
