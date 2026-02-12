@@ -115,6 +115,8 @@ class Settings(BaseSettings):
     RAG_GROUNDING_MIN_CLAIM_OVERLAP: float = 0.20
     RAG_GROUNDING_MAX_UNGROUNDED_CLAIMS: int = 1
     RAG_GROUNDING_MIN_TOKEN_MATCHES: int = 2
+    RAG_GROUNDING_MIN_GROUNDED_CLAIM_RATIO: float = 0.60
+    RAG_STRICT_DOC_TYPE_FILTER: bool = True
 
     # Multihop RAG defaults
     MULTIHOP_MAX_HOPS: int = 2
@@ -131,6 +133,12 @@ class Settings(BaseSettings):
 
     # Debug payload controls
     DEBUG_INCLUDE_PROMPTS: bool = False
+
+    # Initial admin bootstrap
+    INITIAL_ADMIN_BOOTSTRAP: bool = True
+    INITIAL_ADMIN_USERNAME: Optional[str] = "admin"
+    INITIAL_ADMIN_PASSWORD: Optional[str] = None
+    INITIAL_ADMIN_PASSWORD_HASH: Optional[str] = None
 
 def get_settings() -> Settings:
     return Settings()

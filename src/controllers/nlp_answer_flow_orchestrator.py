@@ -1,5 +1,10 @@
-import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+from helpers.answer_safety import (
+    build_when_direct_answer,
+    has_lahn_arab_support,
+    is_direct_hint_supported,
+)
 
 
 async def answer_rag_question(
@@ -17,13 +22,9 @@ async def answer_rag_question(
     answer_style: Optional[str] = None,
     explain_retrieval: bool = False,
 ):
-    question_type = controller._detect_question_type(query)
-    lowered_query = (query or "").lower()
-    inferred_style = controller._infer_answer_style(query, answer_style)
-
     # Build an augmented retrieval query that incorporates recent
     # conversation turns (if any) so that follow-up questions using
-    # pronouns like "هناك / there" still retrieve the right chunks.
+    # pronouns like "there" still retrieve the right chunks.
     retrieval_text = query or ""
     if chat_messages:
         parts: List[str] = []
@@ -37,7 +38,6 @@ async def answer_rag_question(
         if parts:
             retrieval_text = "\n".join(parts + [query or ""])
 
-    # step1: retrieve related documents
     retrieved_documents = await controller.search_vector_db_collection(
         project=project,
         text=retrieval_text,
@@ -46,84 +46,110 @@ async def answer_rag_question(
         asset_ids=asset_ids,
     )
 
-    # ------------------------------------------------------------------
-    # Guardrail: for questions explicitly about "شيوع اللحن بين العرب"
-    # (e.g. "متى شاع اللحن بين العرب؟"), require that at least one of
-    # the retrieved chunks actually contains both "اللحن" and "العرب".
-    # If no such chunk exists, short-circuit with a deterministic
-    # fallback answer instead of allowing the model to hallucinate a
-    # time based only on partial context (e.g. generic dates in the
-    # document about العربية الفصحى).
-    # ------------------------------------------------------------------
-    if "\u0627\u0644\u0644\u062d\u0646" in lowered_query and "\u0627\u0644\u0639\u0631\u0628" in lowered_query:
-        has_supporting_chunk = False
-        for doc in retrieved_documents or []:
-            text_value = getattr(doc, "text", "") or ""
-            t_low = text_value.lower()
-            if "\u0627\u0644\u0644\u062d\u0646" in t_low and "\u0627\u0644\u0639\u0631\u0628" in t_low:
-                has_supporting_chunk = True
-                break
+    return await answer_rag_from_documents(
+        controller=controller,
+        retrieved_documents=retrieved_documents or [],
+        query=query,
+        chat_messages=chat_messages,
+        stream=stream,
+        collector=collector,
+        asset_labels=asset_labels,
+        asset_labels_by_name=asset_labels_by_name,
+        answer_style=answer_style,
+        explain_retrieval=explain_retrieval,
+    )
 
-        if not has_supporting_chunk:
+
+async def answer_rag_from_documents(
+    controller,
+    retrieved_documents: Optional[List[Any]],
+    query: str,
+    chat_messages: Optional[List[Dict[str, str]]] = None,
+    stream: bool = False,
+    collector: Optional[dict] = None,
+    asset_labels: Optional[Dict[int, str]] = None,
+    asset_labels_by_name: Optional[Dict[str, str]] = None,
+    answer_style: Optional[str] = None,
+    explain_retrieval: bool = False,
+    conversation_context: Optional[str] = None,
+    ambiguity_threshold: Optional[float] = None,
+    force_clarification: Optional[bool] = None,
+):
+    documents = retrieved_documents or []
+    question_type = controller._detect_question_type(query)
+    lowered_query = (query or "").lower()
+    inferred_style = controller._infer_answer_style(query, answer_style)
+
+    if "\u0627\u0644\u0644\u062d\u0646" in lowered_query and "\u0627\u0644\u0639\u0631\u0628" in lowered_query:
+        if not has_lahn_arab_support(documents):
             fallback_answer = (
                 "\u0644\u0627 \u064a\u0645\u0643\u0646 \u062a\u062d\u062f\u064a\u062f \u0645\u062a\u0649 \u0634\u0627\u0639 \u0627\u0644\u0644\u062d\u0646 \u0628\u064a\u0646 \u0627\u0644\u0639\u0631\u0628 \u0645\u0646 \u0627\u0644\u0645\u0633\u062a\u0646\u062f\u0627\u062a \u0627\u0644\u0645\u0641\u0647\u0631\u0633\u0629 \u0627\u0644\u062d\u0627\u0644\u064a\u0629."
             )
-            return fallback_answer, None, None
+            metadata = controller._default_answer_metadata()
+            metadata.update(
+                {
+                    "_question_type": question_type,
+                    "_direct_hint": None,
+                    "_doc_label_for_hint": None,
+                }
+            )
+            return fallback_answer, "", [], metadata
 
     direct_hint = controller._try_extract_direct_answer(
         query=query,
-        documents=retrieved_documents or [],
+        documents=documents,
         question_type=question_type,
     )
 
-    # Try to resolve a human-readable label for the document that most
-    # likely contains the direct hint (e.g., original filename), so that
-    # we can say "according to <document>" instead of "according to the
-    # documents" in deterministic answers.
     doc_label_for_hint: Optional[str] = None
-    if direct_hint and retrieved_documents:
+    if direct_hint and documents:
         chosen_doc = None
-        for doc in retrieved_documents:
+        for doc in documents:
             text_value = getattr(doc, "text", "") or ""
             if direct_hint in text_value:
                 chosen_doc = doc
                 break
         if chosen_doc is None:
-            chosen_doc = retrieved_documents[0]
+            chosen_doc = documents[0]
 
         try:
             doc_label_for_hint = controller._resolve_document_label(
                 getattr(chosen_doc, "metadata", None),
                 fallback_label="Document 1",
+                asset_labels=asset_labels,
+                asset_labels_by_name=asset_labels_by_name,
             )
         except Exception:
             doc_label_for_hint = None
 
-    # For clear "when / متى" questions where we can reliably extract a
-    # concrete date from the retrieved documents, short-circuit and answer
-    # directly rather than delegating to the LLM. This ensures deterministic
-    # behavior even when conversation history might bias the model toward
-    # "unknown" answers. For "why" questions we prefer to pass the hint into
-    # the LLM so it can clean up / enrich the answer.
     if direct_hint and question_type == "when":
-        has_arabic = bool(re.search(r"[\u0600-\u06FF]", query or ""))
-        if doc_label_for_hint:
-            prefix_ar = f'\u0648\u0641\u0642\u0627\u064b \u0644\u0644\u0645\u0633\u062a\u0646\u062f "{doc_label_for_hint}"\u060c '
-            prefix_en = f'According to the document "{doc_label_for_hint}", '
-        else:
-            prefix_ar = "\u0648\u0641\u0642\u0627\u064b \u0644\u0644\u0645\u0633\u062a\u0646\u062f\u0627\u062a\u060c "
-            prefix_en = "According to the documents, "
+        direct_hint_supported = is_direct_hint_supported(
+            query=query,
+            direct_hint=direct_hint,
+            documents=documents,
+        )
+        if not direct_hint_supported:
+            direct_hint = None
 
-        if has_arabic:
-            answer_text = f"{prefix_ar}\u0643\u0627\u0646 \u0630\u0644\u0643 \u0641\u064a {direct_hint}."
-        else:
-            answer_text = f"{prefix_en}this occurred on {direct_hint}."
+    if direct_hint and question_type == "when" and not stream:
+        answer_text = build_when_direct_answer(
+            query=query,
+            direct_hint=direct_hint,
+            doc_label_for_hint=doc_label_for_hint,
+        )
         metadata = controller._default_answer_metadata()
         metadata["answer_confidence"] = 1.0
+        metadata.update(
+            {
+                "_question_type": question_type,
+                "_direct_hint": direct_hint,
+                "_doc_label_for_hint": doc_label_for_hint,
+            }
+        )
         return answer_text, None, None, metadata
 
-    return await controller.generate_rag_answer_from_documents(
-        retrieved_documents=retrieved_documents or [],
+    answer_result, full_prompt, chat_history, answer_metadata = await controller.generate_rag_answer_from_documents(
+        retrieved_documents=documents,
         query=query,
         chat_messages=chat_messages,
         stream=stream,
@@ -133,4 +159,19 @@ async def answer_rag_question(
         direct_hint=direct_hint,
         answer_style=inferred_style,
         explain_retrieval=explain_retrieval,
+        conversation_context=conversation_context,
+        ambiguity_threshold=ambiguity_threshold,
+        force_clarification=force_clarification,
     )
+
+    if not isinstance(answer_metadata, dict):
+        answer_metadata = controller._default_answer_metadata()
+    answer_metadata.update(
+        {
+            "_question_type": question_type,
+            "_direct_hint": direct_hint,
+            "_doc_label_for_hint": doc_label_for_hint,
+        }
+    )
+
+    return answer_result, full_prompt, chat_history, answer_metadata

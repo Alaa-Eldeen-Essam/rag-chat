@@ -21,9 +21,29 @@ RAG_CLARIFICATION_TOTAL = Counter(
     "RAG clarification responses emitted",
     ["mode"],
 )
+RAG_CLARIFICATION_DOC_TYPE_TOTAL = Counter(
+    "rag_clarification_doc_type_total",
+    "RAG clarification responses emitted by mode and doc_type",
+    ["mode", "doc_type"],
+)
 MULTIHOP_SCOPE_PROJECTS = Histogram(
     "multihop_scope_projects",
     "Number of projects included in multihop retrieval scope",
+)
+INVALID_MODEL_REQUEST_TOTAL = Counter(
+    "invalid_model_request_total",
+    "Requests rejected due to an unknown model key",
+    ["endpoint"],
+)
+PROMPT_PAYLOAD_EXPOSURE_TOTAL = Counter(
+    "prompt_payload_exposure_total",
+    "Prompt payload exposure by endpoint and debug flag",
+    ["endpoint", "included"],
+)
+RAG_GROUNDING_FALLBACK_TOTAL = Counter(
+    "rag_grounding_fallback_total",
+    "RAG fallbacks caused by grounding checks",
+    ["mode"],
 )
 
 class PrometheusMiddleware(BaseHTTPMiddleware):

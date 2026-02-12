@@ -1,6 +1,7 @@
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
 from typing import List
+import logging
 import re
 
 from controllers import NLPController
@@ -13,7 +14,8 @@ from models.db_schemes import User
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from routes.schemes.nlp import PushRequest, SearchRequest
 from stores.llm.templates.template_parser import TemplateParser
-from tqdm.auto import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 async def handle_index_project(
@@ -117,8 +119,6 @@ async def handle_index_project(
             },
         )
 
-    pbar = tqdm(total=total_chunks_count, desc="Vector Indexing", position=0)
-
     while has_records:
         page_chunks = await chunk_model.get_poject_chunks(
             project_id=project.project_id,
@@ -146,8 +146,13 @@ async def handle_index_project(
                 content={"signal": ResponseSignal.INSERT_INTO_VECTORDB_ERROR.value},
             )
 
-        pbar.update(len(page_chunks))
         inserted_items_count += len(page_chunks)
+        logger.info(
+            "INDEX_PROGRESS project_id=%s inserted=%d total=%d",
+            project.project_id,
+            inserted_items_count,
+            total_chunks_count,
+        )
 
     return JSONResponse(
         content={

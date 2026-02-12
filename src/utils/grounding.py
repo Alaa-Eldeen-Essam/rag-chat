@@ -41,14 +41,17 @@ def grounding_report(
     min_claim_overlap: float = 0.20,
     max_ungrounded_claims: int = 1,
     max_claims: int = 6,
-) -> Dict[str, float | int | bool]:
+) -> Dict[str, object]:
     if not answer:
         return {
             "grounded": False,
             "lexical_matches": 0,
             "claims_checked": 0,
             "ungrounded_claims": 0,
+            "grounded_claims": 0,
+            "grounded_claim_ratio": 0.0,
             "best_overlap_avg": 0.0,
+            "claim_overlaps": [],
         }
 
     evidence_tokens = set(_tokenize(evidence_corpus or "", min_token_len=min_token_len))
@@ -64,6 +67,7 @@ def grounding_report(
 
     overlaps: List[float] = []
     ungrounded = 0
+    grounded_claims = 0
     for claim in claims:
         overlap = _best_claim_overlap(
             claim,
@@ -73,14 +77,24 @@ def grounding_report(
         overlaps.append(overlap)
         if overlap < min_claim_overlap:
             ungrounded += 1
+        else:
+            grounded_claims += 1
 
     claims_ok = ungrounded <= max(0, int(max_ungrounded_claims))
     grounded = bool(lexical_ok and claims_ok)
     avg_overlap = (sum(overlaps) / len(overlaps)) if overlaps else 1.0
+    grounded_claim_ratio = (
+        float(grounded_claims) / float(len(claims))
+        if claims
+        else 1.0
+    )
     return {
         "grounded": grounded,
         "lexical_matches": lexical_matches,
         "claims_checked": len(claims),
         "ungrounded_claims": ungrounded,
+        "grounded_claims": grounded_claims,
+        "grounded_claim_ratio": grounded_claim_ratio,
         "best_overlap_avg": avg_overlap,
+        "claim_overlaps": overlaps,
     }

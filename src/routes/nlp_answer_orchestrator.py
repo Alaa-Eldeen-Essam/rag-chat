@@ -2,6 +2,7 @@ from fastapi import Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import Any, Dict, List, Optional, Callable
 from types import SimpleNamespace
+import asyncio
 import json
 import logging
 import math
@@ -9,17 +10,20 @@ import re
 import time
 
 from controllers import NLPController
+from helpers.answer_safety import (
+    build_why_hint_answer,
+)
 from helpers.assets import get_asset_display_name
 from helpers.config import Settings
 from models import ResponseSignal
 from models.AssetModel import AssetModel
 from models.ChatConversationModel import ChatConversationModel
 from models.ChatHistoryModel import ChatHistoryModel
+from models.ProjectModel import ProjectModel
 from models.db_schemes import Asset, User
 from models.enums.AssetTypeEnum import AssetTypeEnum
 from routes.nlp_answer_utils import (
     build_answer_sources,
-    clean_display_hint,
     compose_collector_output,
     default_answer_metadata,
     exposed_chat_history,
@@ -33,10 +37,14 @@ from stores.llm.LLMEnums import DocumentTypeEnum
 from stores.llm.templates.template_parser import TemplateParser
 from utils.grounding import grounding_report
 from utils.metrics import (
+    INVALID_MODEL_REQUEST_TOTAL,
     MULTIHOP_SCOPE_PROJECTS,
+    PROMPT_PAYLOAD_EXPOSURE_TOTAL,
     PROMPT_GUARD_BYPASS_TOTAL,
     RAG_CLARIFICATION_TOTAL,
+    RAG_CLARIFICATION_DOC_TYPE_TOTAL,
     RAG_FALLBACK_TOTAL,
+    RAG_GROUNDING_FALLBACK_TOTAL,
 )
 from utils.prompt_guard import evaluate_prompt, should_bypass_prompt_guard
 
@@ -51,9 +59,6 @@ async def handle_answer_rag(
     app_settings: Settings,
     language_detector: Callable[[str, str], str],
 ):
-
-    # Project access check removed
-    project = SimpleNamespace(project_id=project_id)
 
     prompt_guard_enabled = getattr(app_settings, "PROMPT_GUARD_ENABLED", True)
     pytector_enabled = getattr(app_settings, "PROMPT_GUARD_PYTECTOR", False)
@@ -107,6 +112,30 @@ async def handle_answer_rag(
                 },
             )
 
+    project_model = await ProjectModel.create_instance(db_client=request.app.db_client)
+    project, project_status = await project_model.get_project_or_create_one(
+        project_id=project_id,
+        current_user=current_user,
+        create_if_missing=False,
+        is_private=None,
+        require_owner=False,
+    )
+    if not project:
+        response_status = (
+            status.HTTP_403_FORBIDDEN
+            if project_status == "forbidden"
+            else status.HTTP_404_NOT_FOUND
+        )
+        response_signal = (
+            ResponseSignal.ACCESS_FORBIDDEN_ERROR.value
+            if project_status == "forbidden"
+            else ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
+        )
+        return JSONResponse(
+            status_code=response_status,
+            content={"signal": response_signal},
+        )
+
     asset_label_lookup: Dict[int, str] = {}
     asset_label_lookup_by_name: Dict[str, str] = {}
     accessible_asset_ids: set[int] = set()
@@ -119,9 +148,30 @@ async def handle_answer_rag(
     default_generation_client = getattr(request.app, "generation_client", None)
 
     requested_model_key = (search_request.model or default_model_key or "best").lower()
-    generation_client = generation_clients.get(requested_model_key) or default_generation_client
-    model_key_used = requested_model_key if generation_client else default_model_key or "best"
-    generation_client = generation_client or default_generation_client
+    selected_generation_client = generation_clients.get(requested_model_key)
+    if search_request.model and not selected_generation_client:
+        INVALID_MODEL_REQUEST_TOTAL.labels(endpoint="answer").inc()
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "detail": f"Unknown model '{search_request.model}'.",
+            },
+        )
+
+    generation_client = selected_generation_client or default_generation_client
+    if generation_client is None:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                "detail": "Generation backend is not configured.",
+            },
+        )
+
+    fallback_model_key = default_model_key or next(iter(generation_clients.keys()), "best")
+    model_key_used = requested_model_key if selected_generation_client else fallback_model_key
+    model_id_used = generation_models.get(model_key_used)
 
     template_language = language_detector(
         search_request.text,
@@ -150,12 +200,13 @@ async def handle_answer_rag(
         asset_model = await AssetModel.create_instance(
             db_client=request.app.db_client
         )
-        # Collect all accessible assets across projects (own + public, or all for admins)
-        all_assets = await asset_model.get_all_accessible_assets(
+        # Project-only retrieval scope: only assets from the requested project.
+        project_assets = await asset_model.get_all_project_assets(
+            asset_project_id=project.project_id,
             asset_type=AssetTypeEnum.FILE.value,
             current_user=current_user,
         )
-        for asset in all_assets:
+        for asset in project_assets:
             display_name = get_asset_display_name(asset) or asset.asset_name
             asset_label_lookup[asset.asset_id] = display_name
             asset_label_lookup_by_name[asset.asset_name] = display_name
@@ -182,6 +233,17 @@ async def handle_answer_rag(
         reranker_max_candidates=getattr(request.app, "reranker_max_candidates", 0),
     )
     debug_include_prompts = bool(getattr(app_settings, "DEBUG_INCLUDE_PROMPTS", False))
+
+    def _exposed_full_prompt(value: Optional[str]) -> Optional[str]:
+        exposed_value = exposed_full_prompt(
+            value,
+            debug_include_prompts=debug_include_prompts,
+        )
+        PROMPT_PAYLOAD_EXPOSURE_TOTAL.labels(
+            endpoint="answer",
+            included="true" if bool(exposed_value) else "false",
+        ).inc()
+        return exposed_value
 
     chat_history_model = await ChatHistoryModel.create_instance(
         db_client=request.app.db_client
@@ -395,7 +457,7 @@ async def handle_answer_rag(
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
                     "model": model_key_used,
-                    "model_id": generation_models.get(model_key_used),
+                    "model_id": model_id_used,
                 }) + "\n"
 
                 try:
@@ -428,10 +490,7 @@ async def handle_answer_rag(
                     payload = {
                         "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
                         "answer": final_answer,
-                        "full_prompt": exposed_full_prompt(
-                            full_prompt,
-                            debug_include_prompts=debug_include_prompts,
-                        ),
+                        "full_prompt": _exposed_full_prompt(full_prompt),
                         "chat_history": exposed_chat_history(
                             chat_history,
                             debug_include_prompts=debug_include_prompts,
@@ -440,7 +499,7 @@ async def handle_answer_rag(
                         "conversation_title": conversation.conversation_title,
                         "document_types": history_filter,
                         "model": model_key_used,
-                        "model_id": generation_models.get(model_key_used),
+                        "model_id": model_id_used,
                         "asset_id": None,
                         "message_id": history_record.id,
                         "sources": answer_sources,
@@ -472,10 +531,7 @@ async def handle_answer_rag(
             content={
                 "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
                 "answer": final_answer,
-                "full_prompt": exposed_full_prompt(
-                    full_prompt,
-                    debug_include_prompts=debug_include_prompts,
-                ),
+                "full_prompt": _exposed_full_prompt(full_prompt),
                 "chat_history": exposed_chat_history(
                     chat_history,
                     debug_include_prompts=debug_include_prompts,
@@ -484,7 +540,7 @@ async def handle_answer_rag(
                 "conversation_title": conversation.conversation_title,
                 "document_types": history_filter,
                 "model": model_key_used,
-                "model_id": generation_models.get(model_key_used),
+                "model_id": model_id_used,
                 "asset_id": None,
                 "message_id": history_record.id,
                 "sources": answer_sources,
@@ -526,7 +582,8 @@ async def handle_answer_rag(
         and retrieval_text.strip()
     ):
         try:
-            vecs = embedding_client.embed_text(
+            vecs = await asyncio.to_thread(
+                embedding_client.embed_text,
                 text=[last_user_question, retrieval_text],
                 document_type=DocumentTypeEnum.QUERY.value,
             )
@@ -646,139 +703,93 @@ async def handle_answer_rag(
             documents=retrieved_documents,
         )
 
-    # Attempt deterministic direct extraction (e.g. dates / reasons) before
-    # delegating to the LLM, so simple factual questions behave consistently.
+    # Canonical answer flow context
     question_type = nlp_controller._detect_question_type(search_request.text)
-    direct_hint = nlp_controller._try_extract_direct_answer(
-        query=search_request.text,
-        documents=retrieved_documents or [],
-        question_type=question_type,
-    )
-
-    # Try to resolve a human-readable label for the document that most likely
-    # contains the direct hint (for example, the original filename). This
-    # allows deterministic answers like "according to <document name>" instead
-    # of the more generic "according to the documents".
+    direct_hint: Optional[str] = None
     doc_label_for_hint: Optional[str] = None
-    if direct_hint and retrieved_documents:
-        chosen_doc = None
-        for doc in retrieved_documents:
-            text_value = getattr(doc, "text", "") or ""
-            if direct_hint in text_value:
-                chosen_doc = doc
-                break
-        if chosen_doc is None:
-            chosen_doc = retrieved_documents[0]
-
-        try:
-            doc_label_for_hint = nlp_controller._resolve_document_label(
-                getattr(chosen_doc, "metadata", None),
-                fallback_label="Document 1",
-                asset_labels=asset_label_lookup if asset_label_lookup else None,
-                asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
-                asset_id_hint=None,
-            )
-        except Exception:
-            doc_label_for_hint = None
-
-    # For clear "when" questions where we can reliably extract a concrete
-    # date from the retrieved documents, short-circuit and answer directly for
-    # non-streaming calls. For "why" we prefer to pass the extracted
-    # hint into the LLM so it can clean up / enrich the answer instead of
-    # returning the raw snippet.
     answer_result = None
     full_prompt = None
     chat_history = None
     answer_metadata = default_answer_metadata()
-
-    if not search_request.stream and direct_hint and question_type == "when":
-        has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
-        if doc_label_for_hint:
-            prefix_ar = f'وفقًا للمستند "{doc_label_for_hint}"، '
-            prefix_en = f'According to the document "{doc_label_for_hint}", '
-        else:
-            prefix_ar = "وفقًا للمستندات، "
-            prefix_en = "According to the documents, "
-
-        if has_arabic:
-            answer_result = f"{prefix_ar}كان ذلك في {direct_hint}."
-        else:
-            answer_result = f"{prefix_en}this occurred on {direct_hint}."
+    if is_multihop_mode:
+        # Multihop defaults
+        max_hops = (
+            search_request.multihop_hops
+            or getattr(app_settings, "MULTIHOP_MAX_HOPS", 2)
+            or 2
+        )
+        per_hop_k = (
+            search_request.multihop_k
+            or getattr(app_settings, "MULTIHOP_PER_HOP_K", 6)
+            or 6
+        )
+        per_hop_evidence = (
+            search_request.multihop_per_hop_evidence
+            or getattr(app_settings, "MULTIHOP_PER_HOP_EVIDENCE", 3)
+            or 3
+        )
+        multihop_temp = (
+            search_request.multihop_temperature
+            if search_request.multihop_temperature is not None
+            else getattr(app_settings, "MULTIHOP_TEMPERATURE", None)
+        )
+        # Validate ranges before calling controller to surface friendly errors.
+        if max_hops < 1 or max_hops > 5 or per_hop_k < 1 or per_hop_k > 20 or per_hop_evidence < 1:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                    "detail": "Invalid multihop parameters. Use hops 1-5, top_k 1-20, evidence >=1."
+                },
+            )
+        if per_hop_evidence > per_hop_k:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
+                    "detail": "Multihop evidence per hop must be <= top_k."
+                },
+            )
+        answer_result, full_prompt, chat_history, retrieved_documents, answer_metadata = await nlp_controller.generate_multihop_rag_answer(
+            project=project,
+            query=search_request.text,
+            chat_messages=chat_messages,
+            stream=bool(search_request.stream),
+            collector=collector,
+            doc_types=doc_type_filter,
+            asset_ids=list(accessible_asset_ids) if accessible_asset_ids else None,
+            max_hops=max_hops,
+            per_hop_k=per_hop_k,
+            per_hop_evidence=per_hop_evidence,
+            generation_temperature=multihop_temp,
+            answer_style=inferred_answer_style,
+            conversation_context=conversation_intent_context,
+            history_weight=adaptive_history_weight,
+            ambiguity_threshold=configured_ambiguity_threshold,
+            force_clarification=force_clarification,
+            project_asset_scope=asset_ids_by_project,
+        )
     else:
-        if is_multihop_mode:
-            # Multihop defaults
-            max_hops = (
-                search_request.multihop_hops
-                or getattr(app_settings, "MULTIHOP_MAX_HOPS", 2)
-                or 2
-            )
-            per_hop_k = (
-                search_request.multihop_k
-                or getattr(app_settings, "MULTIHOP_PER_HOP_K", 6)
-                or 6
-            )
-            per_hop_evidence = (
-                search_request.multihop_per_hop_evidence
-                or getattr(app_settings, "MULTIHOP_PER_HOP_EVIDENCE", 3)
-                or 3
-            )
-            multihop_temp = (
-                search_request.multihop_temperature
-                if search_request.multihop_temperature is not None
-                else getattr(app_settings, "MULTIHOP_TEMPERATURE", None)
-            )
-            # Validate ranges before calling controller to surface friendly errors.
-            if max_hops < 1 or max_hops > 5 or per_hop_k < 1 or per_hop_k > 20 or per_hop_evidence < 1:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={
-                        "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
-                        "detail": "Invalid multihop parameters. Use hops 1-5, top_k 1-20, evidence >=1."
-                    },
-                )
-            if per_hop_evidence > per_hop_k:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={
-                        "signal": ResponseSignal.RAG_ANSWER_ERROR.value,
-                        "detail": "Multihop evidence per hop must be <= top_k."
-                    },
-                )
-            answer_result, full_prompt, chat_history, retrieved_documents, answer_metadata = await nlp_controller.generate_multihop_rag_answer(
-                project=project,
-                query=search_request.text,
-                chat_messages=chat_messages,
-                stream=bool(search_request.stream),
-                collector=collector,
-                doc_types=doc_type_filter,
-                asset_ids=list(accessible_asset_ids) if accessible_asset_ids else None,
-                max_hops=max_hops,
-                per_hop_k=per_hop_k,
-                per_hop_evidence=per_hop_evidence,
-                generation_temperature=multihop_temp,
-                answer_style=inferred_answer_style,
-                conversation_context=conversation_intent_context,
-                history_weight=adaptive_history_weight,
-                ambiguity_threshold=configured_ambiguity_threshold,
-                force_clarification=force_clarification,
-                project_asset_scope=asset_ids_by_project,
-            )
-        else:
-            answer_result, full_prompt, chat_history, answer_metadata = await nlp_controller.generate_rag_answer_from_documents(
-                retrieved_documents=retrieved_documents,
-                query=search_request.text,
-                chat_messages=chat_messages,
-                stream=bool(search_request.stream),
-                collector=collector,
-                asset_labels=asset_label_lookup if asset_label_lookup else None,
-                asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
-                direct_hint=direct_hint,
-                answer_style=inferred_answer_style,
-                explain_retrieval=bool(search_request.explain_retrieval),
-                conversation_context=conversation_intent_context,
-                ambiguity_threshold=configured_ambiguity_threshold,
-                force_clarification=force_clarification,
-            )
+        answer_result, full_prompt, chat_history, answer_metadata = await nlp_controller.answer_rag_from_documents(
+            retrieved_documents=retrieved_documents,
+            query=search_request.text,
+            chat_messages=chat_messages,
+            stream=bool(search_request.stream),
+            collector=collector,
+            asset_labels=asset_label_lookup if asset_label_lookup else None,
+            asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+            answer_style=inferred_answer_style,
+            explain_retrieval=bool(search_request.explain_retrieval),
+            conversation_context=conversation_intent_context,
+            ambiguity_threshold=configured_ambiguity_threshold,
+            force_clarification=force_clarification,
+        )
+        if isinstance(answer_metadata, dict):
+            question_type = str(answer_metadata.get("_question_type") or question_type)
+            raw_direct_hint = answer_metadata.get("_direct_hint")
+            direct_hint = str(raw_direct_hint) if raw_direct_hint else None
+            raw_doc_label = answer_metadata.get("_doc_label_for_hint")
+            doc_label_for_hint = str(raw_doc_label) if raw_doc_label else None
 
     analysis_parse_failed = bool(
         isinstance(answer_metadata, dict) and answer_metadata.get("_analysis_parse_failed", False)
@@ -792,6 +803,10 @@ async def handle_answer_rag(
     needs_clarification = bool(answer_metadata.get("needs_clarification", False))
     if needs_clarification:
         RAG_CLARIFICATION_TOTAL.labels(mode=requested_mode).inc()
+        RAG_CLARIFICATION_DOC_TYPE_TOTAL.labels(
+            mode=requested_mode,
+            doc_type=explicit_doc_type or "all",
+        ).inc()
 
     fallback_metric_marked = False
 
@@ -891,6 +906,10 @@ async def handle_answer_rag(
         1,
         int(getattr(app_settings, "RAG_GROUNDING_MIN_TOKEN_MATCHES", 2) or 2),
     )
+    grounding_min_grounded_claim_ratio = _clamp_unit(
+        getattr(app_settings, "RAG_GROUNDING_MIN_GROUNDED_CLAIM_RATIO", 0.60),
+        0.60,
+    )
 
     def enforce_answer_safety(candidate_answer: str) -> str:
         if not candidate_answer or needs_clarification:
@@ -912,15 +931,21 @@ async def handle_answer_rag(
             min_claim_overlap=grounding_min_claim_overlap,
             max_ungrounded_claims=grounding_max_ungrounded_claims,
         )
-        if not bool(report.get("grounded", False)):
+        grounded_claim_ratio = float(report.get("grounded_claim_ratio") or 0.0)
+        if (
+            not bool(report.get("grounded", False))
+            or grounded_claim_ratio < grounding_min_grounded_claim_ratio
+        ):
             logger.info(
-                "RAG_GROUNDING_FALLBACK mode=%s lexical_matches=%s claims_checked=%s ungrounded_claims=%s avg_overlap=%.3f",
+                "RAG_GROUNDING_FALLBACK mode=%s lexical_matches=%s claims_checked=%s ungrounded_claims=%s grounded_claim_ratio=%.3f avg_overlap=%.3f",
                 requested_mode,
                 report.get("lexical_matches"),
                 report.get("claims_checked"),
                 report.get("ungrounded_claims"),
+                grounded_claim_ratio,
                 float(report.get("best_overlap_avg") or 0.0),
             )
+            RAG_GROUNDING_FALLBACK_TOTAL.labels(mode=requested_mode).inc()
             return fallback_answer
         return candidate_answer
 
@@ -934,7 +959,7 @@ async def handle_answer_rag(
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
                     "model": model_key_used,
-                    "model_id": generation_models.get(model_key_used),
+                    "model_id": model_id_used,
                 }) + "\n"
 
                 yield json.dumps({
@@ -973,7 +998,7 @@ async def handle_answer_rag(
                     "conversation_title": conversation.conversation_title,
                     "document_types": history_filter or ["all", history_mode_tag],
                     "model": model_key_used,
-                    "model_id": generation_models.get(model_key_used),
+                    "model_id": model_id_used,
                     "asset_id": asset_filter,
                     "message_id": history_record.id,
                     "sources": [],
@@ -988,7 +1013,7 @@ async def handle_answer_rag(
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
                     "model": model_key_used,
-                    "model_id": generation_models.get(model_key_used),
+                    "model_id": model_id_used,
                 }) + "\n"
 
                 if needs_clarification:
@@ -1014,24 +1039,11 @@ async def handle_answer_rag(
                 # but the model still produced a refusal-style answer, prefer
                 # a deterministic answer built directly from the hint instead.
                 if direct_hint and question_type == "why" and (not needs_clarification) and looks_like_refusal(final_answer):
-                    has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
-                    hint_for_display = clean_display_hint(direct_hint)
-                    if doc_label_for_hint:
-                        prefix_ar = f'وفقًا للمستند "{doc_label_for_hint}"، '
-                        prefix_en = f'According to the document "{doc_label_for_hint}", '
-                    else:
-                        prefix_ar = "وفقًا للمستندات، "
-                        prefix_en = "According to the documents, "
-                    if has_arabic:
-                        final_answer = (
-                            f"{prefix_ar}تذكر المستندات المعلومة التالية جوابًا عن سؤالك: "
-                            f"{hint_for_display}"
-                        )
-                    else:
-                        final_answer = (
-                            f"{prefix_en}the documents provide the following information as the "
-                            f"answer to your question: {hint_for_display}"
-                        )
+                    final_answer = build_why_hint_answer(
+                        query=search_request.text,
+                        hint_text=direct_hint,
+                        doc_label_for_hint=doc_label_for_hint,
+                    )
                 final_answer = enforce_answer_safety(final_answer)
                 signal_value = ResponseSignal.RAG_ANSWER_SUCCESS.value if final_answer else ResponseSignal.RAG_ANSWER_ERROR.value
                 if not needs_clarification and final_answer == fallback_answer:
@@ -1064,10 +1076,7 @@ async def handle_answer_rag(
                 payload = {
                     "signal": signal_value,
                     "answer": final_answer,
-                    "full_prompt": exposed_full_prompt(
-                        full_prompt,
-                        debug_include_prompts=debug_include_prompts,
-                    ),
+                    "full_prompt": _exposed_full_prompt(full_prompt),
                     "chat_history": exposed_chat_history(
                         chat_history,
                         debug_include_prompts=debug_include_prompts,
@@ -1076,7 +1085,7 @@ async def handle_answer_rag(
                     "conversation_title": conversation.conversation_title,
                     "document_types": history_filter or ["all", history_mode_tag],
                     "model": model_key_used,
-                    "model_id": generation_models.get(model_key_used),
+                    "model_id": model_id_used,
                     "asset_id": asset_filter,
                     "message_id": history_record.id if history_record else None,
                     "sources": answer_sources,
@@ -1120,7 +1129,7 @@ async def handle_answer_rag(
                 "conversation_title": conversation.conversation_title,
                 "document_types": history_filter or ["all", history_mode_tag],
                 "model": model_key_used,
-                "model_id": generation_models.get(model_key_used),
+                "model_id": model_id_used,
                 "asset_id": asset_filter,
                 "message_id": history_record.id,
                 "sources": [],
@@ -1135,24 +1144,11 @@ async def handle_answer_rag(
     # extractor, so the user still gets a concrete, document-grounded
     # answer instead of "unknown".
     if answer and direct_hint and question_type == "why" and (not needs_clarification) and looks_like_refusal(answer):
-        has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
-        hint_for_display = clean_display_hint(direct_hint)
-        if doc_label_for_hint:
-            prefix_ar = f'وفقًا للمستند "{doc_label_for_hint}"، '
-            prefix_en = f'According to the document "{doc_label_for_hint}", '
-        else:
-            prefix_ar = "وفقًا للمستندات، "
-            prefix_en = "According to the documents, "
-        if has_arabic:
-            answer = (
-                f"{prefix_ar}تذكر المستندات المعلومة التالية جوابًا عن سؤالك: "
-                f"{hint_for_display}"
-            )
-        else:
-            answer = (
-                f"{prefix_en}the documents provide the following information as the "
-                f"answer to your question: {hint_for_display}"
-            )
+        answer = build_why_hint_answer(
+            query=search_request.text,
+            hint_text=direct_hint,
+            doc_label_for_hint=doc_label_for_hint,
+        )
 
     answer = enforce_answer_safety(answer)
 
@@ -1195,10 +1191,7 @@ async def handle_answer_rag(
         content={
             "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
             "answer": answer,
-            "full_prompt": exposed_full_prompt(
-                full_prompt,
-                debug_include_prompts=debug_include_prompts,
-            ),
+            "full_prompt": _exposed_full_prompt(full_prompt),
             "chat_history": exposed_chat_history(
                 chat_history,
                 debug_include_prompts=debug_include_prompts,
@@ -1207,12 +1200,13 @@ async def handle_answer_rag(
             "conversation_title": conversation.conversation_title,
             "document_types": history_filter or ["all", history_mode_tag],
             "model": model_key_used,
-            "model_id": generation_models.get(model_key_used),
+            "model_id": model_id_used,
             "asset_id": asset_filter,
             "message_id": history_record.id,
             "sources": answer_sources,
             **answer_metadata,
         }
     )
+
 
 

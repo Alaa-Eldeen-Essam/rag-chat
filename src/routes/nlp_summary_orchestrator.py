@@ -2,7 +2,8 @@ from fastapi import Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+import asyncio
 import json
 
 from controllers import NLPController
@@ -14,8 +15,10 @@ from models.ChunkModel import ChunkModel
 from models.SummaryModel import SummaryModel
 from models.db_schemes import Asset, SummaryRecord, User
 from models.enums.AssetTypeEnum import AssetTypeEnum
+from routes.nlp_answer_utils import exposed_full_prompt
 from routes.schemes.nlp import DeleteSummariesRequest, SummarizeRequest
 from stores.llm.templates.template_parser import TemplateParser
+from utils.metrics import PROMPT_PAYLOAD_EXPOSURE_TOTAL
 
 
 async def handle_summarize_project(
@@ -61,6 +64,18 @@ async def handle_summarize_project(
 
     model_key_used = requested_model_key if selected_generation_client else (default_model_key or "best")
     model_id_used = generation_models.get(model_key_used)
+    debug_include_prompts = bool(getattr(app_settings, "DEBUG_INCLUDE_PROMPTS", False))
+
+    def _exposed_prompt(value: Optional[str], endpoint: str) -> Optional[str]:
+        exposed = exposed_full_prompt(
+            value,
+            debug_include_prompts=debug_include_prompts,
+        )
+        PROMPT_PAYLOAD_EXPOSURE_TOTAL.labels(
+            endpoint=endpoint,
+            included="true" if bool(exposed) else "false",
+        ).inc()
+        return exposed
 
     project, status_code = await project_model.get_project_or_create_one(
         project_id=project_id,
@@ -214,7 +229,8 @@ async def handle_summarize_project(
             if not section:
                 continue
 
-            section_summary, _ = nlp_controller.summarize_chunks(
+            section_summary, _ = await asyncio.to_thread(
+                nlp_controller.summarize_chunks,
                 chunks=section,
                 focus=summarize_request.focus,
                 max_output_tokens=section_max_tokens,
@@ -258,15 +274,27 @@ async def handle_summarize_project(
     stream_enabled = summarize_request.stream if summarize_request.stream is not None else True
     collector = {"output": [], "reasoning": []} if stream_enabled else None
 
-    summary_output, full_prompt = nlp_controller.summarize_chunks(
-        chunks=summary_input_chunks,
-        focus=summarize_request.focus,
-        max_output_tokens=summary_max_tokens,
-        asset_labels=asset_label_lookup if asset_label_lookup else None,
-        asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
-        stream=stream_enabled,
-        collector=collector,
-    )
+    if stream_enabled:
+        summary_output, full_prompt = nlp_controller.summarize_chunks(
+            chunks=summary_input_chunks,
+            focus=summarize_request.focus,
+            max_output_tokens=summary_max_tokens,
+            asset_labels=asset_label_lookup if asset_label_lookup else None,
+            asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+            stream=stream_enabled,
+            collector=collector,
+        )
+    else:
+        summary_output, full_prompt = await asyncio.to_thread(
+            nlp_controller.summarize_chunks,
+            chunks=summary_input_chunks,
+            focus=summarize_request.focus,
+            max_output_tokens=summary_max_tokens,
+            asset_labels=asset_label_lookup if asset_label_lookup else None,
+            asset_labels_by_name=asset_label_lookup_by_name if asset_label_lookup_by_name else None,
+            stream=stream_enabled,
+            collector=collector,
+        )
 
     if stream_enabled:
         if summary_output is None:
@@ -310,6 +338,7 @@ async def handle_summarize_project(
                 )
 
                 if final_summary:
+                    stored_prompt = _exposed_prompt(full_prompt, "summary_storage")
                     await summary_model.create_summary(
                         user_id=current_user.id,
                         project_id=project.project_id,
@@ -326,10 +355,11 @@ async def handle_summarize_project(
                         },
                         chunk_ids=chunk_ids,
                         chunk_count=len(chunks),
-                        prompt_text=full_prompt,
+                        prompt_text=stored_prompt,
                         max_output_tokens=summary_max_tokens,
                     )
 
+                payload_prompt = _exposed_prompt(full_prompt, "summary")
                 payload = {
                     "signal": signal_value,
                     "summary": final_summary,
@@ -337,7 +367,7 @@ async def handle_summarize_project(
                     "file_id": selected_file,
                     "focus": summarize_request.focus,
                     "max_output_tokens": summary_max_tokens,
-                    "full_prompt": full_prompt,
+                    "full_prompt": payload_prompt,
                     "model": model_key_used,
                     "model_id": model_id_used,
                 }
@@ -356,6 +386,7 @@ async def handle_summarize_project(
 
     summary = summary_output
 
+    stored_prompt = _exposed_prompt(full_prompt, "summary_storage")
     await summary_model.create_summary(
         user_id=current_user.id,
         project_id=project.project_id,
@@ -372,10 +403,11 @@ async def handle_summarize_project(
         },
         chunk_ids=chunk_ids,
         chunk_count=len(chunks),
-        prompt_text=full_prompt,
+        prompt_text=stored_prompt,
         max_output_tokens=summary_max_tokens,
     )
 
+    payload_prompt = _exposed_prompt(full_prompt, "summary")
     return JSONResponse(
         content={
             "signal": ResponseSignal.SUMMARY_GENERATION_SUCCESS.value,
@@ -384,7 +416,7 @@ async def handle_summarize_project(
             "file_id": selected_file,
             "focus": summarize_request.focus,
             "max_output_tokens": summary_max_tokens,
-            "full_prompt": full_prompt,
+            "full_prompt": payload_prompt,
             "model": model_key_used,
             "model_id": model_id_used,
         }
@@ -440,6 +472,7 @@ async def handle_get_summary(
     request: Request,
     summary_id: int,
     current_user: User,
+    app_settings: Optional[Settings] = None,
 ):
     async with request.app.db_client() as session:
         result = await session.execute(
@@ -481,6 +514,15 @@ async def handle_get_summary(
         asset_doc_type = getattr(asset, "asset_document_type", None)
 
     payload = summary_record.request_payload or {}
+    debug_include_prompts = bool(getattr(app_settings, "DEBUG_INCLUDE_PROMPTS", False))
+    prompt_text = exposed_full_prompt(
+        summary_record.prompt_text,
+        debug_include_prompts=debug_include_prompts,
+    )
+    PROMPT_PAYLOAD_EXPOSURE_TOTAL.labels(
+        endpoint="summary_get",
+        included="true" if bool(prompt_text) else "false",
+    ).inc()
 
     return JSONResponse(
         content={
@@ -496,7 +538,7 @@ async def handle_get_summary(
             "created_at": (
                 summary_record.created_at.isoformat() if summary_record.created_at else None
             ),
-            "prompt_text": summary_record.prompt_text,
+            "prompt_text": prompt_text,
             "max_output_tokens_used": summary_record.max_output_tokens,
         }
     )

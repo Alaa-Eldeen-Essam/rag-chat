@@ -31,6 +31,7 @@ async def handle_list_conversations(
     return JSONResponse(
         content={
             "signal": ResponseSignal.CONVERSATIONS_FETCH_SUCCESS.value,
+            "detail_code": "conversation_list_success",
             "conversations": payload,
             "total": len(payload),
         }
@@ -66,6 +67,7 @@ async def handle_list_user_doc_types(
     return JSONResponse(
         content={
             "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
+            "detail_code": "doc_type_list_success",
             "doc_types": doc_types,
             "total": len(doc_types),
         }
@@ -91,6 +93,7 @@ async def handle_get_conversation_history(
             status_code=status.HTTP_404_NOT_FOUND,
             content={
                 "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value,
+                "detail_code": "conversation_not_found",
                 "detail": "Conversation not found.",
             },
         )
@@ -122,6 +125,7 @@ async def handle_get_conversation_history(
     return JSONResponse(
         content={
             "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
+            "detail_code": "conversation_history_success",
             "conversation": {
                 "conversation_id": conversation.conversation_id,
                 "title": conversation.conversation_title,
@@ -149,7 +153,8 @@ async def handle_rename_conversation(
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content={
-                "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
+                "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value,
+                "detail_code": "conversation_not_found",
                 "detail": "Conversation not found.",
             },
         )
@@ -169,6 +174,7 @@ async def handle_rename_conversation(
     return JSONResponse(
         content={
             "signal": ResponseSignal.CONVERSATION_HISTORY_SUCCESS.value,
+            "detail_code": "conversation_update_success",
             "conversation_id": conversation_id,
             "title": new_title if new_title is not None else conversation.conversation_title,
             "is_pinned": (
@@ -194,7 +200,8 @@ async def handle_delete_conversation(
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content={
-                "signal": ResponseSignal.USER_NOT_FOUND_ERROR.value,
+                "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value,
+                "detail_code": "conversation_not_found",
                 "detail": "Conversation not found.",
             },
         )
@@ -202,6 +209,7 @@ async def handle_delete_conversation(
     return JSONResponse(
         content={
             "signal": ResponseSignal.FILE_DELETE_SUCCESS.value,
+            "detail_code": "conversation_delete_success",
             "conversation_id": conversation_id,
         }
     )

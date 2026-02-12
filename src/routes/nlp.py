@@ -247,11 +247,13 @@ async def get_summary(
     request: Request,
     summary_id: int,
     current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
 ):
     return await handle_get_summary(
         request=request,
         summary_id=summary_id,
         current_user=current_user,
+        app_settings=app_settings,
     )
 
 

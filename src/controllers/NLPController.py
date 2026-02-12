@@ -19,6 +19,7 @@ from .nlp_analysis_orchestrator import (
     resolve_document_label as orchestrate_resolve_document_label,
 )
 from .nlp_answer_flow_orchestrator import (
+    answer_rag_from_documents as orchestrate_answer_rag_from_documents,
     answer_rag_question as orchestrate_answer_rag_question,
 )
 from .nlp_direct_answer_orchestrator import (
@@ -397,6 +398,37 @@ class NLPController(BaseController):
             asset_labels_by_name=asset_labels_by_name,
             answer_style=answer_style,
             explain_retrieval=explain_retrieval,
+        )
+
+    async def answer_rag_from_documents(
+        self,
+        retrieved_documents: List[Any],
+        query: str,
+        chat_messages: Optional[List[Dict[str, str]]] = None,
+        stream: bool = False,
+        collector: Optional[dict] = None,
+        asset_labels: Optional[Dict[int, str]] = None,
+        asset_labels_by_name: Optional[Dict[str, str]] = None,
+        answer_style: Optional[str] = None,
+        explain_retrieval: bool = False,
+        conversation_context: Optional[str] = None,
+        ambiguity_threshold: Optional[float] = None,
+        force_clarification: Optional[bool] = None,
+    ):
+        return await orchestrate_answer_rag_from_documents(
+            self,
+            retrieved_documents=retrieved_documents,
+            query=query,
+            chat_messages=chat_messages,
+            stream=stream,
+            collector=collector,
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
+            answer_style=answer_style,
+            explain_retrieval=explain_retrieval,
+            conversation_context=conversation_context,
+            ambiguity_threshold=ambiguity_threshold,
+            force_clarification=force_clarification,
         )
 
     async def generate_multihop_rag_answer(

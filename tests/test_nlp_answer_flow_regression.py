@@ -51,7 +51,12 @@ class AnswerFlowRegressionTests(unittest.TestCase):
         controller = _StubController()
 
         async def fake_search(**_kwargs):
-            return [SimpleNamespace(text="any evidence", metadata={"source_name": "Doc A"})]
+            return [
+                SimpleNamespace(
+                    text="The event happened on 2 December 2021 according to the record.",
+                    metadata={"source_name": "Doc A"},
+                )
+            ]
 
         controller.search_vector_db_collection = fake_search
         controller._try_extract_direct_answer = lambda **_kwargs: "2 December 2021"
@@ -94,7 +99,7 @@ class AnswerFlowRegressionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(result), 3)
+        self.assertEqual(len(result), 4)
         self.assertIn("\u0644\u0627 \u064a\u0645\u0643\u0646 \u062a\u062d\u062f\u064a\u062f", result[0])
         self.assertFalse(controller.called_generate)
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import time
@@ -247,7 +248,8 @@ async def search_vector_db_collection(
 ):
     collection_name = controller.create_collection_name(project_id=project.project_id)
 
-    vectors = controller.embedding_client.embed_text(
+    vectors = await asyncio.to_thread(
+        controller.embedding_client.embed_text,
         text=text,
         document_type=DocumentTypeEnum.QUERY.value,
     )
@@ -324,6 +326,9 @@ async def search_vector_db_collection(
         return []
 
     if doc_types:
+        strict_doc_type_filter = bool(
+            getattr(controller.app_settings, "RAG_STRICT_DOC_TYPE_FILTER", True)
+        )
         doc_types_normalized = {dt.lower() for dt in doc_types}
         filtered_results = []
         for result in results:
@@ -336,7 +341,7 @@ async def search_vector_db_collection(
 
             if chunk_type and chunk_type.lower() in doc_types_normalized:
                 filtered_results.append(result)
-            elif chunk_type is None:
+            elif chunk_type is None and not strict_doc_type_filter:
                 filtered_results.append(result)
 
         if filtered_results:

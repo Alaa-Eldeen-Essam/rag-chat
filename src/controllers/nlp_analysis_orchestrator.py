@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -560,7 +561,8 @@ async def analyze_evidence_for_answer(
                     role=controller.generation_client.enums.SYSTEM.value,
                 )
             ]
-            raw_analysis = controller.generation_client.generate_text(
+            raw_analysis = await asyncio.to_thread(
+                controller.generation_client.generate_text,
                 prompt=analysis_prompt,
                 chat_history=analysis_chat_history,
                 temperature=0.0,
@@ -572,7 +574,8 @@ async def analyze_evidence_for_answer(
                     analysis_prompt
                     + "\n\nImportant: return one valid JSON object only. No markdown, no prose."
                 )
-                retry_output = controller.generation_client.generate_text(
+                retry_output = await asyncio.to_thread(
+                    controller.generation_client.generate_text,
                     prompt=retry_prompt,
                     chat_history=analysis_chat_history,
                     temperature=0.0,

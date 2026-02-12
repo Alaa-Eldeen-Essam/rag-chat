@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -159,7 +160,8 @@ async def generate_multihop_rag_answer(
             )
         ]
 
-        hop_summary = controller.generation_client.generate_text(
+        hop_summary = await asyncio.to_thread(
+            controller.generation_client.generate_text,
             prompt=hop_summary_prompt,
             chat_history=hop_history,
             temperature=generation_temperature if generation_temperature is not None else 0.0,
@@ -395,9 +397,10 @@ async def generate_rag_answer_from_documents(
             collector=collector
         )
     else:
-        answer_or_stream = controller.generation_client.generate_text(
+        answer_or_stream = await asyncio.to_thread(
+            controller.generation_client.generate_text,
             prompt=full_prompt,
-            chat_history=chat_history
+            chat_history=chat_history,
         )
 
     return answer_or_stream, full_prompt, chat_history, answer_metadata
@@ -468,7 +471,8 @@ async def generate_regular_chat_response(
         )
         return answer_stream, final_prompt, chat_history
 
-    answer = controller.generation_client.generate_text(
+    answer = await asyncio.to_thread(
+        controller.generation_client.generate_text,
         prompt=final_prompt,
         chat_history=chat_history,
     )

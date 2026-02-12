@@ -207,6 +207,31 @@ class NlpControllerDelegationTests(unittest.TestCase):
         self.assertEqual(captured.get("query"), "when")
         self.assertEqual(captured.get("limit"), 4)
 
+    def test_answer_rag_from_documents_delegates(self):
+        controller = self._controller()
+        captured = {}
+
+        async def fake(self_obj, **kwargs):
+            captured.update(kwargs)
+            return ("answer", None, None, {"answer_confidence": 1.0})
+
+        old = MODULE.orchestrate_answer_rag_from_documents
+        MODULE.orchestrate_answer_rag_from_documents = fake
+        try:
+            result = asyncio.run(
+                controller.answer_rag_from_documents(
+                    retrieved_documents=[SimpleNamespace(text="x", metadata={})],
+                    query="when",
+                    stream=False,
+                )
+            )
+        finally:
+            MODULE.orchestrate_answer_rag_from_documents = old
+
+        self.assertEqual(result[0], "answer")
+        self.assertEqual(captured.get("query"), "when")
+        self.assertEqual(len(captured.get("retrieved_documents") or []), 1)
+
     def test_index_into_vector_db_delegates(self):
         controller = self._controller()
         captured = {}
