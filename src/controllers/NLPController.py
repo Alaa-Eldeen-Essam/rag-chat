@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional
 from types import SimpleNamespace
@@ -65,6 +66,46 @@ class NLPController(BaseController):
         self.search_client = search_client
         self.reranker_client = reranker_client
         self.reranker_max_candidates = reranker_max_candidates or 0
+        self._metrics_lock = threading.Lock()
+        self._response_metrics: Dict[str, Dict[str, float]] = {
+            "__global__": {"total": 0.0, "clarifications": 0.0, "parse_failures": 0.0}
+        }
+
+    def record_response_metrics(
+        self,
+        mode: str,
+        needs_clarification: bool,
+        parse_failed: bool,
+    ) -> Dict[str, float]:
+        normalized_mode = (mode or "unknown").strip().lower() or "unknown"
+        with self._metrics_lock:
+            global_bucket = self._response_metrics.setdefault(
+                "__global__", {"total": 0.0, "clarifications": 0.0, "parse_failures": 0.0}
+            )
+            mode_bucket = self._response_metrics.setdefault(
+                normalized_mode,
+                {"total": 0.0, "clarifications": 0.0, "parse_failures": 0.0},
+            )
+
+            global_bucket["total"] += 1.0
+            mode_bucket["total"] += 1.0
+            if needs_clarification:
+                global_bucket["clarifications"] += 1.0
+                mode_bucket["clarifications"] += 1.0
+            if parse_failed:
+                global_bucket["parse_failures"] += 1.0
+                mode_bucket["parse_failures"] += 1.0
+
+            mode_total = max(1.0, mode_bucket["total"])
+            global_total = max(1.0, global_bucket["total"])
+            return {
+                "mode_total": mode_bucket["total"],
+                "mode_clarification_rate": mode_bucket["clarifications"] / mode_total,
+                "mode_parse_failure_rate": mode_bucket["parse_failures"] / mode_total,
+                "global_total": global_bucket["total"],
+                "global_clarification_rate": global_bucket["clarifications"] / global_total,
+                "global_parse_failure_rate": global_bucket["parse_failures"] / global_total,
+            }
 
     def _normalize_answer_style(self, style: Optional[str]) -> str:
         normalized = (style or "").strip().lower()
@@ -403,6 +444,629 @@ class NLPController(BaseController):
 
         fused.sort(key=lambda d: getattr(d, "score", 0.0), reverse=True)
         return fused[:limit]
+
+    def _clamp_unit(self, value: Optional[float], fallback: float) -> float:
+        try:
+            parsed = float(value if value is not None else fallback)
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(0.0, min(1.0, parsed))
+
+    def compute_adaptive_history_weight(
+        self,
+        configured_weight: Optional[float],
+        followup_similarity: Optional[float],
+        followup_threshold: Optional[float],
+    ) -> float:
+        base_weight = self._clamp_unit(
+            configured_weight,
+            getattr(self.app_settings, "RAG_HISTORY_WEIGHT", 0.75),
+        )
+        threshold = self._clamp_unit(
+            followup_threshold,
+            getattr(self.app_settings, "RAG_HISTORY_FOLLOWUP_SIM_THRESHOLD", 0.30),
+        )
+        conservative_weight = min(base_weight, 0.35)
+        if followup_similarity is None:
+            return conservative_weight
+        try:
+            similarity = float(followup_similarity)
+        except (TypeError, ValueError):
+            return conservative_weight
+        if similarity >= threshold:
+            return base_weight
+        return conservative_weight
+
+    def fuse_query_and_history_results(
+        self,
+        query_only_docs: Optional[List[RetrievedDocument]],
+        history_aware_docs: Optional[List[RetrievedDocument]],
+        limit: int,
+        history_weight: float,
+    ) -> List[RetrievedDocument]:
+        query_only_docs = query_only_docs or []
+        history_aware_docs = history_aware_docs or []
+        if not query_only_docs and not history_aware_docs:
+            return []
+        if not history_aware_docs:
+            return query_only_docs[:limit]
+        if not query_only_docs:
+            return history_aware_docs[:limit]
+
+        query_map = self._build_scored_doc_map(query_only_docs)
+        history_map = self._build_scored_doc_map(history_aware_docs)
+
+        fused_weight = self._clamp_unit(history_weight, 0.75)
+        query_weight = max(0.0, 1.0 - fused_weight)
+
+        combined: Dict[str, Dict[str, Any]] = {}
+        for key, payload in query_map.items():
+            combined[key] = {
+                "doc": payload["doc"],
+                "query_score": payload["score"],
+                "history_score": 0.0,
+            }
+        for key, payload in history_map.items():
+            entry = combined.setdefault(
+                key,
+                {
+                    "doc": payload["doc"],
+                    "query_score": 0.0,
+                    "history_score": 0.0,
+                },
+            )
+            entry["history_score"] = max(entry["history_score"], payload["score"])
+            if entry["doc"] is None:
+                entry["doc"] = payload["doc"]
+
+        fused: List[RetrievedDocument] = []
+        for payload in combined.values():
+            doc = payload["doc"]
+            score = (
+                query_weight * payload["query_score"]
+                + fused_weight * payload["history_score"]
+            )
+            doc.score = score
+            fused.append(doc)
+
+        fused.sort(key=lambda item: getattr(item, "score", 0.0), reverse=True)
+        return fused[:limit]
+
+    def build_conversation_context(
+        self,
+        chat_messages: Optional[List[Dict[str, str]]],
+        max_turns: Optional[int] = None,
+    ) -> str:
+        if not chat_messages:
+            return ""
+
+        turns = max_turns or getattr(self.app_settings, "RAG_HISTORY_MAX_TURNS", 8)
+        try:
+            turns = int(turns)
+        except (TypeError, ValueError):
+            turns = 8
+        turns = max(1, min(turns, 20))
+
+        selected = chat_messages[-turns:]
+        lines: List[str] = []
+        for idx, message in enumerate(selected, 1):
+            prompt = self.generation_client.process_text((message.get("prompt") or "").strip())
+            answer = self.generation_client.process_text((message.get("answer") or "").strip())
+            if prompt:
+                lines.append(f"User[{idx}]: {prompt}")
+            if answer:
+                lines.append(f"Assistant[{idx}]: {answer}")
+        return "\n".join(lines).strip()
+
+    def _default_answer_metadata(self) -> Dict[str, Any]:
+        return {
+            "needs_clarification": False,
+            "clarification_question": None,
+            "clarification_options": None,
+            "answer_confidence": None,
+            "ambiguity_reason": None,
+            "evidence_summary": None,
+        }
+
+    def _extract_json_object(self, text: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not text:
+            return None
+        raw = text.strip()
+        if not raw:
+            return None
+
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+
+        candidate = raw[start : end + 1]
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return None
+        return None
+
+    def _normalize_analysis_payload(
+        self,
+        payload: Optional[Dict[str, Any]],
+        query: str,
+    ) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {
+            "resolved_question": query,
+            "evidence_facts": [],
+            "candidate_answers": [],
+            "ambiguity_detected": False,
+            "ambiguity_reason": "",
+            "clarification_question": "",
+            "clarification_options": [],
+            "answer_confidence": 0.0,
+        }
+        if not payload:
+            return normalized
+
+        resolved_question = payload.get("resolved_question")
+        if isinstance(resolved_question, str) and resolved_question.strip():
+            normalized["resolved_question"] = resolved_question.strip()
+
+        facts = payload.get("evidence_facts")
+        if isinstance(facts, list):
+            cleaned_facts = []
+            for item in facts:
+                if not isinstance(item, dict):
+                    continue
+                fact_text = str(item.get("fact") or "").strip()
+                if not fact_text:
+                    continue
+                support = item.get("support")
+                if not isinstance(support, list):
+                    support = []
+                support = [str(s).strip() for s in support if str(s).strip()]
+                confidence = self._clamp_unit(item.get("confidence"), 0.5)
+                cleaned_facts.append(
+                    {
+                        "fact": fact_text,
+                        "support": support,
+                        "confidence": confidence,
+                    }
+                )
+            normalized["evidence_facts"] = cleaned_facts
+
+        candidates = payload.get("candidate_answers")
+        if isinstance(candidates, list):
+            cleaned_candidates = []
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                answer_text = str(item.get("answer") or "").strip()
+                if not answer_text:
+                    continue
+                support_count_raw = item.get("support_count")
+                try:
+                    support_count = int(support_count_raw) if support_count_raw is not None else 0
+                except (TypeError, ValueError):
+                    support_count = 0
+                confidence = self._clamp_unit(item.get("confidence"), 0.5)
+                cleaned_candidates.append(
+                    {
+                        "answer": answer_text,
+                        "support_count": max(0, support_count),
+                        "confidence": confidence,
+                    }
+                )
+            cleaned_candidates.sort(key=lambda rec: rec.get("confidence", 0.0), reverse=True)
+            normalized["candidate_answers"] = cleaned_candidates
+
+        normalized["ambiguity_detected"] = bool(payload.get("ambiguity_detected", False))
+        ambiguity_reason = payload.get("ambiguity_reason")
+        if isinstance(ambiguity_reason, str):
+            normalized["ambiguity_reason"] = ambiguity_reason.strip()
+        clarification_question = payload.get("clarification_question")
+        if isinstance(clarification_question, str):
+            normalized["clarification_question"] = clarification_question.strip()
+        clarification_options = payload.get("clarification_options")
+        if isinstance(clarification_options, list):
+            normalized["clarification_options"] = [
+                str(option).strip()
+                for option in clarification_options
+                if str(option).strip()
+            ]
+
+        top_confidence = 0.0
+        if normalized["candidate_answers"]:
+            top_confidence = float(normalized["candidate_answers"][0].get("confidence") or 0.0)
+        normalized["answer_confidence"] = self._clamp_unit(
+            payload.get("answer_confidence"),
+            top_confidence,
+        )
+
+        return normalized
+
+    def _build_heuristic_analysis(
+        self,
+        query: str,
+        documents: List[Any],
+        asset_labels: Optional[Dict[int, str]] = None,
+        asset_labels_by_name: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        heuristic = self._normalize_analysis_payload({}, query)
+        facts: List[Dict[str, Any]] = []
+        candidates: List[Dict[str, Any]] = []
+        max_docs = min(4, len(documents))
+
+        for idx, doc in enumerate(documents[:max_docs]):
+            text_value = (getattr(doc, "text", "") or "").strip()
+            if not text_value:
+                continue
+
+            doc_label = self._resolve_document_label(
+                getattr(doc, "metadata", None),
+                fallback_label=f"Document {idx + 1}",
+                asset_labels=asset_labels,
+                asset_labels_by_name=asset_labels_by_name,
+            )
+            snippet = re.sub(r"\s+", " ", text_value)[:220].strip()
+            score = self._clamp_unit(getattr(doc, "score", None), 0.5)
+            facts.append(
+                {
+                    "fact": snippet,
+                    "support": [doc_label],
+                    "confidence": score,
+                }
+            )
+            candidates.append(
+                {
+                    "answer": snippet,
+                    "support_count": 1,
+                    "confidence": score,
+                }
+            )
+
+        heuristic["evidence_facts"] = facts
+        candidates.sort(key=lambda rec: rec["confidence"], reverse=True)
+        heuristic["candidate_answers"] = candidates
+        heuristic["answer_confidence"] = candidates[0]["confidence"] if candidates else 0.0
+        return heuristic
+
+    def _build_evidence_summary(self, analysis: Dict[str, Any]) -> str:
+        facts = analysis.get("evidence_facts") or []
+        if not isinstance(facts, list) or not facts:
+            candidates = analysis.get("candidate_answers") or []
+            if isinstance(candidates, list) and candidates:
+                top = candidates[0].get("answer")
+                if isinstance(top, str) and top.strip():
+                    return top.strip()
+            return ""
+
+        lines: List[str] = []
+        for fact in facts[:4]:
+            if not isinstance(fact, dict):
+                continue
+            fact_text = str(fact.get("fact") or "").strip()
+            if not fact_text:
+                continue
+            support = fact.get("support")
+            support_str = ""
+            if isinstance(support, list) and support:
+                support_str = f" ({', '.join([str(s) for s in support[:2]])})"
+            lines.append(f"- {fact_text}{support_str}")
+        return "\n".join(lines).strip()
+
+    def _extract_conflict_signatures(self, text: str) -> List[tuple[str, str]]:
+        content = str(text or "").strip()
+        if not content:
+            return []
+
+        signatures: List[tuple[str, str]] = []
+        lower = content.lower()
+
+        # Date-like values (YYYY-MM-DD / DD/MM/YYYY / YYYY)
+        for match in re.findall(r"\b\d{1,4}[-/]\d{1,2}[-/]\d{1,4}\b", lower):
+            signatures.append(("date", match))
+        for match in re.findall(r"\b(19|20)\d{2}\b", lower):
+            signatures.append(("year", match))
+
+        # Number-like values
+        for match in re.findall(r"\b\d+(?:[.,]\d+)?\b", lower):
+            signatures.append(("number", match.replace(",", "")))
+
+        # Name-like values (quoted phrases or two-token person/org style text)
+        for match in re.findall(r"[\"“”'«»]([^\"“”'«»]{2,80})[\"“”'«»]", content):
+            cleaned = re.sub(r"\s+", " ", match).strip().lower()
+            if cleaned and not re.search(r"\d", cleaned):
+                signatures.append(("name", cleaned))
+
+        latin_name_match = re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", content)
+        if latin_name_match:
+            signatures.append(("name", latin_name_match.group(0).strip().lower()))
+
+        arabic_name_match = re.search(r"[\u0600-\u06FF]{2,}(?:\s+[\u0600-\u06FF]{2,})+", content)
+        if arabic_name_match:
+            signatures.append(("name", arabic_name_match.group(0).strip().lower()))
+
+        unique = []
+        seen = set()
+        for sig in signatures:
+            if sig in seen:
+                continue
+            seen.add(sig)
+            unique.append(sig)
+        return unique
+
+    def _has_key_value_conflict(
+        self,
+        analysis: Dict[str, Any],
+        threshold: float,
+        top_conf: float,
+    ) -> bool:
+        typed_values: Dict[str, set[str]] = {"date": set(), "year": set(), "number": set(), "name": set()}
+
+        candidates = analysis.get("candidate_answers") or []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            conf = float(candidate.get("confidence") or 0.0)
+            if conf < max(0.0, top_conf - threshold):
+                continue
+            text = str(candidate.get("answer") or "").strip()
+            for sig_type, sig_value in self._extract_conflict_signatures(text):
+                typed_values.setdefault(sig_type, set()).add(sig_value)
+
+        facts = analysis.get("evidence_facts") or []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            conf = self._clamp_unit(fact.get("confidence"), 0.5)
+            if conf < max(0.0, top_conf - threshold):
+                continue
+            text = str(fact.get("fact") or "").strip()
+            for sig_type, sig_value in self._extract_conflict_signatures(text):
+                typed_values.setdefault(sig_type, set()).add(sig_value)
+
+        return any(len(values) > 1 for values in typed_values.values())
+
+    def _apply_ambiguity_gate(
+        self,
+        analysis: Dict[str, Any],
+        query: str,
+        ambiguity_threshold: Optional[float],
+        top_n: Optional[int],
+    ) -> Dict[str, Any]:
+        threshold = self._clamp_unit(
+            ambiguity_threshold,
+            getattr(self.app_settings, "RAG_AMBIGUITY_THRESHOLD", 0.12),
+        )
+        configured_top_n = top_n or getattr(self.app_settings, "RAG_AMBIGUITY_TOP_N", 4)
+        try:
+            configured_top_n = int(configured_top_n)
+        except (TypeError, ValueError):
+            configured_top_n = 4
+        configured_top_n = max(2, min(configured_top_n, 10))
+
+        candidates = analysis.get("candidate_answers")
+        if not isinstance(candidates, list):
+            candidates = []
+        candidates = sorted(
+            [c for c in candidates if isinstance(c, dict)],
+            key=lambda rec: float(rec.get("confidence") or 0.0),
+            reverse=True,
+        )
+        analysis["candidate_answers"] = candidates
+
+        top_conf = float(candidates[0].get("confidence") or 0.0) if candidates else 0.0
+        second_conf = float(candidates[1].get("confidence") or 0.0) if len(candidates) > 1 else 0.0
+        confidence_gap = top_conf - second_conf
+
+        conflict_pool = candidates[:configured_top_n]
+        unique_top_answers = {
+            str(item.get("answer") or "").strip().lower()
+            for item in conflict_pool
+            if str(item.get("answer") or "").strip()
+            and float(item.get("confidence") or 0.0) >= max(0.0, top_conf - threshold)
+        }
+        competing_candidates = len(unique_top_answers) > 1
+        weak_separation = len(candidates) > 1 and confidence_gap <= threshold
+        key_value_conflict = self._has_key_value_conflict(
+            analysis=analysis,
+            threshold=threshold,
+            top_conf=top_conf,
+        )
+
+        ambiguity_detected = bool(analysis.get("ambiguity_detected", False))
+        if competing_candidates or weak_separation or key_value_conflict:
+            ambiguity_detected = True
+
+        if ambiguity_detected and not str(analysis.get("ambiguity_reason") or "").strip():
+            if weak_separation:
+                analysis["ambiguity_reason"] = "Multiple candidates have close confidence scores."
+            elif key_value_conflict:
+                analysis["ambiguity_reason"] = "Evidence contains conflicting key values (such as dates, numbers, or names)."
+            elif competing_candidates:
+                analysis["ambiguity_reason"] = "Multiple evidence sections support different plausible answers."
+            else:
+                analysis["ambiguity_reason"] = "Evidence appears ambiguous."
+
+        if ambiguity_detected:
+            clarification_question = str(analysis.get("clarification_question") or "").strip()
+            if not clarification_question:
+                has_arabic = bool(re.search(r"[\u0600-\u06FF]", query or ""))
+                clarification_question = (
+                    "هل يمكنك تحديد أي خيار تقصده بدقة؟"
+                    if has_arabic
+                    else "Could you clarify which exact option you mean?"
+                )
+                analysis["clarification_question"] = clarification_question
+
+            options = analysis.get("clarification_options")
+            if not isinstance(options, list):
+                options = []
+            cleaned_options = [str(opt).strip() for opt in options if str(opt).strip()]
+            if not cleaned_options:
+                for item in conflict_pool:
+                    value = str(item.get("answer") or "").strip()
+                    if value and value not in cleaned_options:
+                        cleaned_options.append(value)
+                    if len(cleaned_options) >= 4:
+                        break
+            analysis["clarification_options"] = cleaned_options
+
+        analysis["ambiguity_detected"] = ambiguity_detected
+        analysis["answer_confidence"] = self._clamp_unit(
+            analysis.get("answer_confidence"),
+            top_conf,
+        )
+        analysis["evidence_summary"] = self._build_evidence_summary(analysis)
+        return analysis
+
+    async def analyze_evidence_for_answer(
+        self,
+        query: str,
+        retrieved_documents: List[Any],
+        chat_messages: Optional[List[Dict[str, str]]] = None,
+        conversation_context: Optional[str] = None,
+        template_group: str = "rag",
+        ambiguity_threshold: Optional[float] = None,
+        asset_labels: Optional[Dict[int, str]] = None,
+        asset_labels_by_name: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        if not retrieved_documents:
+            analysis = self._normalize_analysis_payload({}, query)
+            analysis["evidence_summary"] = ""
+            analysis["__analysis_source"] = "empty"
+            analysis["__analysis_parse_failed"] = False
+            return analysis
+
+        max_docs = getattr(
+            self.app_settings,
+            "RAG_EVIDENCE_SYNTHESIS_MAX_DOCS",
+            EVIDENCE_DOC_LIMIT,
+        )
+        try:
+            max_docs = int(max_docs)
+        except (TypeError, ValueError):
+            max_docs = EVIDENCE_DOC_LIMIT
+        max_docs = max(1, min(max_docs, 20))
+
+        evidence_docs = list(retrieved_documents[:max_docs])
+        context_text = conversation_context or self.build_conversation_context(chat_messages)
+        use_llm_analysis = bool(
+            getattr(self.app_settings, "RAG_EVIDENCE_SYNTHESIS_ENABLED", True)
+        )
+
+        parsed_analysis: Optional[Dict[str, Any]] = None
+        if use_llm_analysis:
+            try:
+                system_prompt = self.template_parser.get(template_group, "analysis_system_prompt", {}) or (
+                    "You are an evidence analyst. Return strict JSON only."
+                )
+
+                sections: List[str] = []
+                char_budget = EVIDENCE_CHAR_BUDGET
+                for idx, doc in enumerate(evidence_docs):
+                    if char_budget <= 0:
+                        break
+                    chunk_text = (getattr(doc, "text", "") or "").strip()
+                    if not chunk_text:
+                        continue
+                    chunk_text = self.generation_client.process_text(chunk_text)
+                    if len(chunk_text) > char_budget:
+                        chunk_text = chunk_text[:char_budget]
+                    char_budget -= len(chunk_text)
+                    doc_label = self._resolve_document_label(
+                        getattr(doc, "metadata", None),
+                        fallback_label=f"Document {idx + 1}",
+                        asset_labels=asset_labels,
+                        asset_labels_by_name=asset_labels_by_name,
+                    )
+                    section = self.template_parser.get(
+                        template_group,
+                        "document_prompt",
+                        {"doc_label": doc_label, "chunk_text": chunk_text},
+                    ) or f"## Document: {doc_label}\n{chunk_text}"
+                    sections.append(section)
+
+                analysis_footer = self.template_parser.get(
+                    template_group,
+                    "analysis_footer_prompt",
+                    {
+                        "query": query,
+                        "conversation_context": context_text or "",
+                    },
+                ) or (
+                    "Return strict JSON with keys: resolved_question, evidence_facts, "
+                    "candidate_answers, ambiguity_detected, ambiguity_reason, "
+                    "clarification_question, clarification_options, answer_confidence."
+                )
+
+                analysis_prompt = "\n\n".join(
+                    [part for part in ["\n".join(sections), analysis_footer] if part]
+                )
+                analysis_chat_history = [
+                    self.generation_client.construct_prompt(
+                        prompt=system_prompt,
+                        role=self.generation_client.enums.SYSTEM.value,
+                    )
+                ]
+                raw_analysis = self.generation_client.generate_text(
+                    prompt=analysis_prompt,
+                    chat_history=analysis_chat_history,
+                    temperature=0.0,
+                )
+                parsed_analysis = self._extract_json_object(raw_analysis)
+
+                if parsed_analysis is None:
+                    retry_prompt = (
+                        analysis_prompt
+                        + "\n\nImportant: return one valid JSON object only. No markdown, no prose."
+                    )
+                    retry_output = self.generation_client.generate_text(
+                        prompt=retry_prompt,
+                        chat_history=analysis_chat_history,
+                        temperature=0.0,
+                    )
+                    parsed_analysis = self._extract_json_object(retry_output)
+            except Exception as exc:
+                logger.error("Evidence analysis stage failed: %s", exc)
+                parsed_analysis = None
+
+        if parsed_analysis is None:
+            normalized = self._build_heuristic_analysis(
+                query=query,
+                documents=evidence_docs,
+                asset_labels=asset_labels,
+                asset_labels_by_name=asset_labels_by_name,
+            )
+            normalized["__analysis_source"] = "heuristic"
+            normalized["__analysis_parse_failed"] = bool(use_llm_analysis)
+        else:
+            normalized = self._normalize_analysis_payload(parsed_analysis, query)
+            normalized["__analysis_source"] = "llm"
+            normalized["__analysis_parse_failed"] = False
+
+        logger.info(
+            "RAG_ANALYSIS_PARSE template=%s used_llm=%s parse_failed=%s source=%s docs=%d",
+            template_group,
+            bool(use_llm_analysis),
+            bool(normalized.get("__analysis_parse_failed", False)),
+            normalized.get("__analysis_source"),
+            len(evidence_docs),
+        )
+
+        return self._apply_ambiguity_gate(
+            analysis=normalized,
+            query=query,
+            ambiguity_threshold=ambiguity_threshold,
+            top_n=getattr(self.app_settings, "RAG_AMBIGUITY_TOP_N", 4),
+        )
     
     async def index_into_vector_db(
         self,
@@ -1062,7 +1726,9 @@ class NLPController(BaseController):
                 answer_text = f"{prefix_ar}كان ذلك في {direct_hint}."
             else:
                 answer_text = f"{prefix_en}this occurred on {direct_hint}."
-            return answer_text, None, None
+            metadata = self._default_answer_metadata()
+            metadata["answer_confidence"] = 1.0
+            return answer_text, None, None, metadata
 
         return await self.generate_rag_answer_from_documents(
             retrieved_documents=retrieved_documents or [],
@@ -1091,6 +1757,10 @@ class NLPController(BaseController):
         per_hop_evidence: int = 3,
         generation_temperature: Optional[float] = None,
         answer_style: Optional[str] = None,
+        conversation_context: Optional[str] = None,
+        history_weight: Optional[float] = None,
+        ambiguity_threshold: Optional[float] = None,
+        force_clarification: Optional[bool] = None,
     ):
         """
         Multihop RAG: iterative retrieval + hop summaries feeding the next hop.
@@ -1099,6 +1769,10 @@ class NLPController(BaseController):
         max_hops = max(1, min(max_hops or 2, 5))
         per_hop_k = max(1, min(per_hop_k or 6, 20))
         per_hop_evidence = max(1, min(per_hop_evidence or 3, per_hop_k))
+        hop_history_weight = self._clamp_unit(
+            history_weight,
+            getattr(self.app_settings, "RAG_HISTORY_WEIGHT", 0.75),
+        )
         inferred_style = self._infer_answer_style(query, answer_style)
 
         template_language = getattr(self.template_parser, "language", "en")
@@ -1115,28 +1789,54 @@ class NLPController(BaseController):
 
         hop_notes: List[str] = []
         aggregated_evidence: List[Any] = []
+        context_text = (conversation_context or self.build_conversation_context(chat_messages)).strip()
 
         for hop_idx in range(max_hops):
-            retrieval_text_parts: List[str] = []
-            if chat_messages:
-                for msg in chat_messages[-3:]:
-                    prompt_part = (msg.get("prompt") or "").strip()
-                    answer_part = (msg.get("answer") or "").strip()
-                    if prompt_part:
-                        retrieval_text_parts.append(prompt_part)
-                    if answer_part:
-                        retrieval_text_parts.append(answer_part)
-            retrieval_text_parts.append(query or "")
+            query_only_parts: List[str] = []
+            if query:
+                query_only_parts.append(query)
             if hop_notes:
-                retrieval_text_parts.append(" ".join(hop_notes[-2:]))
-            retrieval_text = "\n".join(retrieval_text_parts[-4:]).strip()
+                query_only_parts.append(" ".join(hop_notes[-2:]))
+            query_only_text = "\n".join([part for part in query_only_parts if part]).strip()
+            if not query_only_text:
+                break
+            history_aware_text = query_only_text
+            if context_text:
+                history_aware_text = f"{context_text}\n\n{query_only_text}".strip()
 
-            retrieved = await self.search_vector_db_collection(
+            query_only_results = await self.search_vector_db_collection(
                 project=project,
-                text=retrieval_text,
+                text=query_only_text,
                 limit=per_hop_k,
                 doc_types=doc_types,
                 asset_ids=asset_ids,
+            )
+            history_aware_results = []
+            if history_aware_text == query_only_text:
+                history_aware_results = list(query_only_results or [])
+            else:
+                history_aware_results = await self.search_vector_db_collection(
+                    project=project,
+                    text=history_aware_text,
+                    limit=per_hop_k,
+                    doc_types=doc_types,
+                    asset_ids=asset_ids,
+                )
+
+            retrieved = self.fuse_query_and_history_results(
+                query_only_docs=query_only_results or [],
+                history_aware_docs=history_aware_results or [],
+                limit=per_hop_k,
+                history_weight=hop_history_weight,
+            )
+
+            logger.info(
+                "MULTIHOP_RETRIEVAL_FUSION hop=%d query_only=%d history_aware=%d fused=%d history_weight=%.3f",
+                hop_idx + 1,
+                len(query_only_results or []),
+                len(history_aware_results or []),
+                len(retrieved or []),
+                hop_history_weight,
             )
 
             if not retrieved:
@@ -1203,10 +1903,10 @@ class NLPController(BaseController):
 
         # Fallback: if nothing collected, return None
         if not final_docs:
-            return None, None, None, []
+            return None, None, None, [], self._default_answer_metadata()
 
         # Reuse RAG answering with accumulated evidence.
-        answer_result, full_prompt, chat_history = await self.generate_rag_answer_from_documents(
+        answer_result, full_prompt, chat_history, answer_metadata = await self.generate_rag_answer_from_documents(
             retrieved_documents=final_docs,
             query=query,
             chat_messages=chat_messages,
@@ -1218,9 +1918,13 @@ class NLPController(BaseController):
             answer_style=inferred_style,
             explain_retrieval=False,
             template_group="multihop",
+            conversation_context=conversation_context,
+            ambiguity_threshold=ambiguity_threshold,
+            force_clarification=force_clarification,
         )
 
-        return answer_result, full_prompt, chat_history, final_docs
+        return answer_result, full_prompt, chat_history, final_docs, answer_metadata
+
     async def generate_rag_answer_from_documents(self,
                             retrieved_documents: List[Any],
                             query: str,
@@ -1231,17 +1935,22 @@ class NLPController(BaseController):
                             direct_hint: Optional[str] = None,
                             answer_style: Optional[str] = None,
                             explain_retrieval: bool = False,
-                            template_group: str = "rag"):
-        
+                            template_group: str = "rag",
+                            conversation_context: Optional[str] = None,
+                            ambiguity_threshold: Optional[float] = None,
+                            force_clarification: Optional[bool] = None):
+
         answer_or_stream, full_prompt, chat_history = None, None, None
+        answer_metadata = self._default_answer_metadata()
 
         if not retrieved_documents or len(retrieved_documents) == 0:
-            return answer_or_stream, full_prompt, chat_history
-        
+            return answer_or_stream, full_prompt, chat_history, answer_metadata
+
         # step2: Select evidence documents and construct LLM prompt.
         # Use all retrieved documents (subject to the upstream `limit`)
         # so that the model can see the full evidence set.
         template_language = getattr(self.template_parser, "language", "en")
+        context_text = conversation_context or self.build_conversation_context(chat_messages)
         style_instructions, style_hint = self._build_style_directives(
             answer_style=answer_style,
             explain_retrieval=explain_retrieval,
@@ -1255,6 +1964,66 @@ class NLPController(BaseController):
         )
 
         evidence_documents: List[Any] = list(retrieved_documents)
+
+        analysis = await self.analyze_evidence_for_answer(
+            query=query,
+            retrieved_documents=evidence_documents,
+            chat_messages=chat_messages,
+            conversation_context=context_text,
+            template_group=template_group,
+            ambiguity_threshold=ambiguity_threshold,
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
+        )
+
+        ambiguity_enabled = bool(getattr(self.app_settings, "RAG_AMBIGUITY_ENABLED", True))
+        force_clarify = (
+            bool(getattr(self.app_settings, "RAG_FORCE_CLARIFICATION", True))
+            if force_clarification is None
+            else bool(force_clarification)
+        )
+        needs_clarification = bool(analysis.get("ambiguity_detected", False) and ambiguity_enabled)
+
+        answer_metadata.update(
+            {
+                "needs_clarification": bool(needs_clarification and force_clarify),
+                "clarification_question": analysis.get("clarification_question") or None,
+                "clarification_options": analysis.get("clarification_options") or None,
+                "answer_confidence": analysis.get("answer_confidence"),
+                "ambiguity_reason": analysis.get("ambiguity_reason") or None,
+                "evidence_summary": analysis.get("evidence_summary") or None,
+                "_analysis_parse_failed": bool(analysis.get("__analysis_parse_failed", False)),
+                "_analysis_source": analysis.get("__analysis_source"),
+            }
+        )
+
+        logger.info(
+            "RAG_AMBIGUITY_EVENT mode=%s ambiguity_detected=%s needs_clarification=%s force_clarification=%s reason=%s candidates=%d parse_failed=%s",
+            template_group,
+            bool(analysis.get("ambiguity_detected", False) and ambiguity_enabled),
+            bool(needs_clarification and force_clarify),
+            bool(force_clarify),
+            str(analysis.get("ambiguity_reason") or "").strip(),
+            len(analysis.get("candidate_answers") or []),
+            bool(analysis.get("__analysis_parse_failed", False)),
+        )
+
+        if needs_clarification and force_clarify:
+            clarification_question = (
+                str(analysis.get("clarification_question") or "").strip()
+                or ("Could you clarify which exact option you mean?")
+            )
+            options = analysis.get("clarification_options") or []
+            option_lines = [
+                f"- {str(option).strip()}"
+                for option in options
+                if str(option).strip()
+            ]
+            if option_lines:
+                clarification_text = "\n".join([clarification_question, *option_lines])
+            else:
+                clarification_text = clarification_question
+            return clarification_text, None, None, answer_metadata
 
         document_sections = []
         for idx, doc in enumerate(evidence_documents):
@@ -1284,6 +2053,8 @@ class NLPController(BaseController):
         footer_prompt = self.template_parser.get(template_group, "footer_prompt", {
             "query": query,
             "style_hint": style_hint,
+            "conversation_context": context_text or "",
+            "analysis_summary": analysis.get("evidence_summary") or "",
         })
 
         # step3: Construct Generation Client Prompts
@@ -1346,7 +2117,7 @@ class NLPController(BaseController):
                 chat_history=chat_history
             )
 
-        return answer_or_stream, full_prompt, chat_history
+        return answer_or_stream, full_prompt, chat_history, answer_metadata
 
     async def generate_regular_chat_response(
         self,

@@ -98,6 +98,17 @@ class Settings(BaseSettings):
 
     # Retrieval weighting
     RETRIEVAL_DENSE_WEIGHT: float = 0.6
+    RAG_HISTORY_WEIGHT: float = 0.75
+    RAG_HISTORY_MAX_TURNS: int = 8
+    RAG_HISTORY_FOLLOWUP_SIM_THRESHOLD: float = 0.30
+
+    # Evidence synthesis / ambiguity control
+    RAG_AMBIGUITY_ENABLED: bool = True
+    RAG_AMBIGUITY_THRESHOLD: float = 0.12
+    RAG_AMBIGUITY_TOP_N: int = 4
+    RAG_FORCE_CLARIFICATION: bool = True
+    RAG_EVIDENCE_SYNTHESIS_ENABLED: bool = True
+    RAG_EVIDENCE_SYNTHESIS_MAX_DOCS: int = 8
 
     # Multihop RAG defaults
     MULTIHOP_MAX_HOPS: int = 2

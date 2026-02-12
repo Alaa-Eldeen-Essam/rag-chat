@@ -899,6 +899,68 @@ async def answer_rag(
         search_request.answer_style,
     )
 
+    def _clamp_unit(value: Optional[float], default: float) -> float:
+        try:
+            parsed = float(value if value is not None else default)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(0.0, min(1.0, parsed))
+
+    configured_history_weight = _clamp_unit(
+        search_request.history_weight,
+        getattr(app_settings, "RAG_HISTORY_WEIGHT", 0.75),
+    )
+    configured_ambiguity_threshold = _clamp_unit(
+        search_request.ambiguity_threshold,
+        getattr(app_settings, "RAG_AMBIGUITY_THRESHOLD", 0.12),
+    )
+    force_clarification = (
+        bool(getattr(app_settings, "RAG_FORCE_CLARIFICATION", True))
+        if search_request.force_clarification is None
+        else bool(search_request.force_clarification)
+    )
+
+    history_max_turns = getattr(app_settings, "RAG_HISTORY_MAX_TURNS", 8)
+    try:
+        history_max_turns = int(history_max_turns)
+    except (TypeError, ValueError):
+        history_max_turns = 8
+    history_max_turns = max(1, min(history_max_turns, 20))
+
+    followup_similarity_threshold = _clamp_unit(
+        getattr(app_settings, "RAG_HISTORY_FOLLOWUP_SIM_THRESHOLD", 0.30),
+        0.30,
+    )
+    conversation_intent_context = nlp_controller.build_conversation_context(
+        chat_messages=chat_messages,
+        max_turns=history_max_turns,
+    )
+
+    def default_answer_metadata() -> Dict[str, Any]:
+        return {
+            "needs_clarification": False,
+            "clarification_question": None,
+            "clarification_options": None,
+            "answer_confidence": None,
+            "ambiguity_reason": None,
+            "evidence_summary": None,
+        }
+
+    def merged_answer_metadata(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        metadata = default_answer_metadata()
+        if isinstance(value, dict):
+            metadata.update(
+                {
+                    "needs_clarification": bool(value.get("needs_clarification", False)),
+                    "clarification_question": value.get("clarification_question"),
+                    "clarification_options": value.get("clarification_options"),
+                    "answer_confidence": value.get("answer_confidence"),
+                    "ambiguity_reason": value.get("ambiguity_reason"),
+                    "evidence_summary": value.get("evidence_summary"),
+                }
+            )
+        return metadata
+
     def compose_collector_output(store: Optional[dict]) -> str:
         if not store:
             return ""
@@ -961,7 +1023,7 @@ async def answer_rag(
                         model_key=model_key_used,
                         doc_types=history_filter,
                         response_time_ms=response_time_ms,
-                        fallback_used=False,
+                        fallback_used=(final_answer == general_fallback),
                         resources=answer_sources or None,
                     )
                     await conversation_model.touch_conversation(conversation.conversation_id)
@@ -979,6 +1041,7 @@ async def answer_rag(
                         "asset_id": None,
                         "message_id": history_record.id,
                         "sources": answer_sources,
+                        **default_answer_metadata(),
                     }
                     yield json.dumps(payload) + "\n"
 
@@ -997,7 +1060,7 @@ async def answer_rag(
             model_key=model_key_used,
             doc_types=history_filter,
             response_time_ms=response_time_ms,
-            fallback_used=False,
+            fallback_used=(final_answer == general_fallback),
             resources=answer_sources or None,
         )
         await conversation_model.touch_conversation(conversation.conversation_id)
@@ -1016,6 +1079,7 @@ async def answer_rag(
                 "asset_id": None,
                 "message_id": history_record.id,
                 "sources": answer_sources,
+                **default_answer_metadata(),
             }
         )
 
@@ -1027,12 +1091,6 @@ async def answer_rag(
         if len(w) > 3
     ]
 
-    # For retrieval, embed primarily the current question text. When the
-    # last user question in the same scoped conversation is strongly
-    # similar to the current question (embedding-based), treat the new
-    # query as a follow-up and build a combined retrieval text so that
-    # retrieval stays on-topic in multi-turn flows without relying on
-    # language-specific heuristics.
     retrieval_text = search_request.text or ""
     embedding_client = getattr(request.app, "embedding_client", None)
 
@@ -1050,6 +1108,7 @@ async def answer_rag(
             return None
         return dot / (math.sqrt(na) * math.sqrt(nb))
 
+    followup_similarity: Optional[float] = None
     if (
         embedding_client is not None
         and last_user_question
@@ -1064,12 +1123,18 @@ async def answer_rag(
             )
             if isinstance(vecs, list) and len(vecs) >= 2:
                 v_last, v_now = vecs[0], vecs[1]
-                sim = _cosine_similarity(v_last, v_now)
-                # Treat similarity above this threshold as a follow-up.
-                if sim is not None and sim >= 0.4:
-                    retrieval_text = f"{last_user_question}\n\n{retrieval_text}"
+                followup_similarity = _cosine_similarity(v_last, v_now)
         except Exception as exc:
             logger.error("Follow-up similarity check failed: %s", exc)
+
+    adaptive_history_weight = nlp_controller.compute_adaptive_history_weight(
+        configured_weight=configured_history_weight,
+        followup_similarity=followup_similarity,
+        followup_threshold=followup_similarity_threshold,
+    )
+    history_augmented_query = retrieval_text
+    if conversation_intent_context:
+        history_augmented_query = f"{conversation_intent_context}\n\n{retrieval_text}".strip()
 
     # Ensure requested asset filter(s) are within the user's accessible scope (RAG mode only)
     if not is_regular_mode:
@@ -1120,19 +1185,49 @@ async def answer_rag(
             asset_ids_by_project[pid] = [a.asset_id for a in assets]
 
     retrieved_documents: list[Any] = []
+    query_only_documents: list[Any] = []
+    history_aware_documents: list[Any] = []
+    search_limit = int(search_request.limit or 5)
     if asset_ids_by_project:
         for pid, asset_ids_for_project in asset_ids_by_project.items():
             project_stub = SimpleNamespace(project_id=pid)
-            results = await nlp_controller.search_vector_db_collection(
+            query_results = await nlp_controller.search_vector_db_collection(
                 project=project_stub,
                 text=retrieval_text,
-                limit=search_request.limit,
+                limit=search_limit,
                 doc_types=doc_type_filter if doc_type_filter else None,
                 asset_ids=asset_ids_for_project,
                 keywords=keywords or None,
             )
-            if results:
-                retrieved_documents.extend(results)
+            if query_results:
+                query_only_documents.extend(query_results)
+
+            history_results = await nlp_controller.search_vector_db_collection(
+                project=project_stub,
+                text=history_augmented_query,
+                limit=search_limit,
+                doc_types=doc_type_filter if doc_type_filter else None,
+                asset_ids=asset_ids_for_project,
+                keywords=keywords or None,
+            )
+            if history_results:
+                history_aware_documents.extend(history_results)
+
+    retrieved_documents = nlp_controller.fuse_query_and_history_results(
+        query_only_docs=query_only_documents,
+        history_aware_docs=history_aware_documents,
+        limit=search_limit,
+        history_weight=adaptive_history_weight,
+    )
+
+    logger.debug(
+        "Retrieval fusion stats: query_only=%d history_aware=%d fused=%d history_weight=%.3f sim=%s",
+        len(query_only_documents),
+        len(history_aware_documents),
+        len(retrieved_documents),
+        adaptive_history_weight,
+        f"{followup_similarity:.3f}" if followup_similarity is not None else "none",
+    )
 
     if retrieved_documents:
         retrieved_documents = await nlp_controller.rerank_documents(
@@ -1183,8 +1278,9 @@ async def answer_rag(
     answer_result = None
     full_prompt = None
     chat_history = None
+    answer_metadata = default_answer_metadata()
 
-    if not search_request.stream and direct_hint and question_type == "when":
+    if False and not search_request.stream and direct_hint and question_type == "when":
         has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
         if doc_label_for_hint:
             prefix_ar = f'وفقاً للمستند "{doc_label_for_hint}"، '
@@ -1237,7 +1333,7 @@ async def answer_rag(
                         "detail": "Multihop evidence per hop must be <= top_k."
                     },
                 )
-            answer_result, full_prompt, chat_history, retrieved_documents = await nlp_controller.generate_multihop_rag_answer(
+            answer_result, full_prompt, chat_history, retrieved_documents, answer_metadata = await nlp_controller.generate_multihop_rag_answer(
                 project=project,
                 query=search_request.text,
                 chat_messages=chat_messages,
@@ -1250,9 +1346,13 @@ async def answer_rag(
                 per_hop_evidence=per_hop_evidence,
                 generation_temperature=multihop_temp,
                 answer_style=inferred_answer_style,
+                conversation_context=conversation_intent_context,
+                history_weight=adaptive_history_weight,
+                ambiguity_threshold=configured_ambiguity_threshold,
+                force_clarification=force_clarification,
             )
         else:
-            answer_result, full_prompt, chat_history = await nlp_controller.generate_rag_answer_from_documents(
+            answer_result, full_prompt, chat_history, answer_metadata = await nlp_controller.generate_rag_answer_from_documents(
                 retrieved_documents=retrieved_documents,
                 query=search_request.text,
                 chat_messages=chat_messages,
@@ -1263,7 +1363,41 @@ async def answer_rag(
                 direct_hint=direct_hint,
                 answer_style=inferred_answer_style,
                 explain_retrieval=bool(search_request.explain_retrieval),
+                conversation_context=conversation_intent_context,
+                ambiguity_threshold=configured_ambiguity_threshold,
+                force_clarification=force_clarification,
             )
+
+    analysis_parse_failed = bool(
+        isinstance(answer_metadata, dict) and answer_metadata.get("_analysis_parse_failed", False)
+    )
+    analysis_source = (
+        answer_metadata.get("_analysis_source")
+        if isinstance(answer_metadata, dict)
+        else None
+    )
+    answer_metadata = merged_answer_metadata(answer_metadata)
+    needs_clarification = bool(answer_metadata.get("needs_clarification", False))
+    metrics_snapshot = nlp_controller.record_response_metrics(
+        mode=requested_mode,
+        needs_clarification=needs_clarification,
+        parse_failed=analysis_parse_failed,
+    )
+    logger.info(
+        "RAG_RESPONSE_METRICS mode=%s needs_clarification=%d ambiguity_reason=%s answer_confidence=%s analysis_source=%s parse_failed=%d mode_total=%.0f mode_clarification_rate=%.3f mode_parse_failure_rate=%.3f global_total=%.0f global_clarification_rate=%.3f global_parse_failure_rate=%.3f",
+        requested_mode,
+        1 if needs_clarification else 0,
+        str(answer_metadata.get("ambiguity_reason") or ""),
+        answer_metadata.get("answer_confidence"),
+        analysis_source,
+        1 if analysis_parse_failed else 0,
+        metrics_snapshot.get("mode_total", 0.0),
+        metrics_snapshot.get("mode_clarification_rate", 0.0),
+        metrics_snapshot.get("mode_parse_failure_rate", 0.0),
+        metrics_snapshot.get("global_total", 0.0),
+        metrics_snapshot.get("global_clarification_rate", 0.0),
+        metrics_snapshot.get("global_parse_failure_rate", 0.0),
+    )
 
     # Basic retrieval stats for later analytics
     retrieved_chunks_count = len(retrieved_documents) if retrieved_documents else 0
@@ -1483,6 +1617,7 @@ async def answer_rag(
                     "asset_id": asset_filter,
                     "message_id": history_record.id,
                     "sources": [],
+                    **answer_metadata,
                 }
                 yield json.dumps(payload) + "\n"
                 return
@@ -1496,19 +1631,29 @@ async def answer_rag(
                     "model_id": generation_models.get(model_key_used),
                 }) + "\n"
 
-                for chunk in answer_result:
-                    if chunk:
+                if needs_clarification:
+                    clarification_text = (answer_result or answer_metadata.get("clarification_question") or "").strip()
+                    if clarification_text:
                         yield json.dumps({
                             "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
-                            "delta": chunk,
+                            "delta": clarification_text,
                         }) + "\n"
+                else:
+                    for chunk in answer_result:
+                        if chunk:
+                            yield json.dumps({
+                                "signal": ResponseSignal.RAG_ANSWER_STREAM_DELTA.value,
+                                "delta": chunk,
+                            }) + "\n"
             finally:
                 final_answer = compose_collector_output(collector)
+                if needs_clarification:
+                    final_answer = (answer_result or answer_metadata.get("clarification_question") or "").strip()
 
                 # If we extracted a direct hint for a "why / لماذا" question
                 # but the model still produced a refusal-style answer, prefer
                 # a deterministic answer built directly from the hint instead.
-                if direct_hint and question_type == "why" and looks_like_refusal(final_answer):
+                if direct_hint and question_type == "why" and (not needs_clarification) and looks_like_refusal(final_answer):
                     has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
                     hint_for_display = clean_display_hint(direct_hint)
                     if doc_label_for_hint:
@@ -1540,7 +1685,7 @@ async def answer_rag(
                         model_key=model_key_used,
                         doc_types=history_filter or ["all", history_mode_tag],
                         response_time_ms=response_time_ms,
-                        fallback_used=False,
+                        fallback_used=(not needs_clarification and final_answer == fallback_answer),
                         retrieved_chunks=retrieved_chunks_count,
                         retrieved_doc_types=retrieved_doc_types or None,
                         retrieved_asset_ids=retrieved_asset_ids or None,
@@ -1566,6 +1711,7 @@ async def answer_rag(
                     "asset_id": asset_filter,
                     "message_id": history_record.id if history_record else None,
                     "sources": answer_sources,
+                    **answer_metadata,
                 }
                 yield json.dumps(payload) + "\n"
 
@@ -1608,6 +1754,7 @@ async def answer_rag(
                 "asset_id": asset_filter,
                 "message_id": history_record.id,
                 "sources": [],
+                **answer_metadata,
             }
         )
 
@@ -1617,7 +1764,7 @@ async def answer_rag(
     # "why / لماذا" questions when we have a direct_hint from the
     # extractor, so the user still gets a concrete, document-grounded
     # answer instead of "unknown".
-    if answer and direct_hint and question_type == "why" and looks_like_refusal(answer):
+    if answer and direct_hint and question_type == "why" and (not needs_clarification) and looks_like_refusal(answer):
         has_arabic = bool(re.search(r"[\u0600-\u06FF]", search_request.text or ""))
         hint_for_display = clean_display_hint(direct_hint)
         if doc_label_for_hint:
@@ -1640,7 +1787,7 @@ async def answer_rag(
     # Evidence-strict post-check: if there is essentially no lexical
     # overlap between the answer and the retrieved evidence, prefer the
     # standard fallback message instead of a likely hallucinated answer.
-    if answer:
+    if answer and (not needs_clarification):
         tokens = re.findall(r"\w+", answer.lower(), flags=re.UNICODE)
         content_tokens = [t for t in tokens if len(t) > 3]
         # Very short answers are unlikely to be harmful; skip strict check.
@@ -1676,7 +1823,7 @@ async def answer_rag(
         model_key=model_key_used,
         doc_types=history_filter or ["all", history_mode_tag],
         response_time_ms=response_time_ms,
-        fallback_used=False,
+        fallback_used=(not needs_clarification and answer == fallback_answer),
         retrieved_chunks=retrieved_chunks_count,
         retrieved_doc_types=retrieved_doc_types or None,
         retrieved_asset_ids=retrieved_asset_ids or None,
@@ -1703,6 +1850,7 @@ async def answer_rag(
             "asset_id": asset_filter,
             "message_id": history_record.id,
             "sources": answer_sources,
+            **answer_metadata,
         }
     )
 
