@@ -6,11 +6,40 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .BaseController import BaseController
+from .nlp_analysis_orchestrator import (
+    analyze_evidence_for_answer as orchestrate_analyze_evidence_for_answer,
+    apply_ambiguity_gate as orchestrate_apply_ambiguity_gate,
+    build_evidence_summary as orchestrate_build_evidence_summary,
+    build_heuristic_analysis as orchestrate_build_heuristic_analysis,
+    compact_clarification_option as orchestrate_compact_clarification_option,
+    default_answer_metadata as orchestrate_default_answer_metadata,
+    derive_clarification_option as orchestrate_derive_clarification_option,
+    extract_conflict_signatures as orchestrate_extract_conflict_signatures,
+    extract_json_object as orchestrate_extract_json_object,
+    has_key_value_conflict as orchestrate_has_key_value_conflict,
+    normalize_analysis_payload as orchestrate_normalize_analysis_payload,
+)
+from .nlp_direct_answer_orchestrator import (
+    detect_question_type as orchestrate_detect_question_type,
+    try_extract_direct_answer as orchestrate_try_extract_direct_answer,
+)
 from .nlp_generation_orchestrator import (
     generate_multihop_rag_answer as orchestrate_generate_multihop_rag_answer,
     generate_rag_answer_from_documents as orchestrate_generate_rag_answer_from_documents,
     generate_regular_chat_response as orchestrate_generate_regular_chat_response,
     summarize_chunks as orchestrate_summarize_chunks,
+)
+from .nlp_retrieval_orchestrator import (
+    build_conversation_context as orchestrate_build_conversation_context,
+    build_lexical_query as orchestrate_build_lexical_query,
+    build_scored_doc_map as orchestrate_build_scored_doc_map,
+    clamp_unit as orchestrate_clamp_unit,
+    compute_adaptive_history_weight as orchestrate_compute_adaptive_history_weight,
+    extract_chunk_id_from_metadata as orchestrate_extract_chunk_id_from_metadata,
+    fuse_dense_and_lexical_results as orchestrate_fuse_dense_and_lexical_results,
+    fuse_query_and_history_results as orchestrate_fuse_query_and_history_results,
+    rerank_documents as orchestrate_rerank_documents,
+    search_vector_db_collection as orchestrate_search_vector_db_collection,
 )
 from models.db_schemes import DataChunk, Project, RetrievedDocument
 from stores.llm.LLMEnums import DocumentTypeEnum
@@ -241,50 +270,7 @@ class NLPController(BaseController):
         return None
 
     def _detect_question_type(self, query: str) -> str:
-        """
-        Very lightweight question type detector for Arabic and English.
-        Returns one of: 'when', 'why', 'where', 'who', 'how_many', or ''.
-        """
-        if not query:
-            return ""
-
-        q = (query or "").strip().lower()
-
-        # Basic Arabic / English "when" markers.
-        if "متى" in q or q.startswith("when "):
-            return "when"
-
-        # Basic Arabic / English "why" markers, including common rephrasings.
-        if (
-            "لماذا" in q
-            or "لماذا لم" in q
-            or q.startswith("why ")
-            or "ما سبب" in q
-            or "ما هو سبب" in q
-            or "ما هي أسباب" in q
-            or "ما الاسباب" in q
-            or "ما الأسباب" in q
-            or "ما الذي دفع" in q
-            or "what is the reason" in q
-            or "what's the reason" in q
-            or "what is the cause" in q
-            or "what caused" in q
-        ):
-            return "why"
-
-        # Basic "where" markers.
-        if "أين" in q or q.startswith("where "):
-            return "where"
-
-        # Basic "who" markers.
-        if "من " in q or q.startswith("who "):
-            return "who"
-
-        # Basic "how many" markers (numeric questions).
-        if "كم " in q or "how many" in q:
-            return "how_many"
-
-        return ""
+        return orchestrate_detect_question_type(query)
 
     def _normalize_label_value(self, value: str) -> str:
         label = (value or "").strip()
@@ -330,85 +316,13 @@ class NLPController(BaseController):
         return self._normalize_label_value(fallback_label)
 
     def _build_lexical_query(self, text: str) -> str:
-        """
-        Build a cleaned lexical query for FTS, stripping obvious question
-        words and punctuation so that we focus on content terms.
-        """
-        if not text:
-            return ""
-
-        raw = (text or "").strip()
-        # If there are multiple lines, use the last non-empty one (likely the question).
-        parts = [p.strip() for p in re.split(r"[\r\n]+", raw) if p.strip()]
-        if parts:
-            raw = parts[-1]
-
-        lowered = raw.lower()
-
-        ar_stop = {
-            "متى",
-            "لماذا",
-            "ليه",
-            "ليش",
-            "هل",
-            "ما",
-            "ماذا",
-            "كم",
-            "من",
-            "أين",
-            "اين",
-            "كيف",
-        }
-        en_stop = {
-            "when",
-            "why",
-            "what",
-            "who",
-            "where",
-            "how",
-            "is",
-            "are",
-            "do",
-            "does",
-            "did",
-        }
-
-        tokens = re.findall(r"[\w\u0600-\u06FF]+", lowered, flags=re.UNICODE)
-        cleaned_tokens = []
-        for tok in tokens:
-            if tok in ar_stop or tok in en_stop:
-                continue
-            cleaned_tokens.append(tok)
-
-        return " ".join(cleaned_tokens)
+        return orchestrate_build_lexical_query(text)
 
     def _extract_chunk_id_from_metadata(self, metadata: Optional[Any]) -> Optional[int]:
-        metadata_dict = self._coerce_metadata_dict(metadata)
-        if not metadata_dict:
-            return None
-        chunk_id_value = metadata_dict.get("chunk_id")
-        if chunk_id_value is None:
-            return None
-        try:
-            return int(chunk_id_value)
-        except (TypeError, ValueError):
-            return None
+        return orchestrate_extract_chunk_id_from_metadata(self, metadata)
 
     def _build_scored_doc_map(self, documents: List[RetrievedDocument]):
-        if not documents:
-            return {}
-        raw_scores = [float(getattr(doc, "score", 0.0) or 0.0) for doc in documents]
-        score_min, score_max = min(raw_scores), max(raw_scores)
-        denom = (score_max - score_min) or 1.0
-        scored_map = {}
-        for idx, doc in enumerate(documents):
-            norm = 1.0 if score_max == score_min else (
-                (float(getattr(doc, "score", 0.0) or 0.0) - score_min) / denom
-            )
-            chunk_id = self._extract_chunk_id_from_metadata(getattr(doc, "metadata", None))
-            identifier = str(chunk_id) if chunk_id is not None else f"fallback_{idx}_{hash(doc.text)}"
-            scored_map[identifier] = {"doc": doc, "score": norm}
-        return scored_map
+        return orchestrate_build_scored_doc_map(self, documents)
 
     def _fuse_dense_and_lexical_results(
         self,
@@ -417,45 +331,16 @@ class NLPController(BaseController):
         limit: int,
         dense_weight: float = 0.6,
     ) -> List[RetrievedDocument]:
-        dense_docs = dense_docs or []
-        lexical_docs = lexical_docs or []
-
-        if not dense_docs and not lexical_docs:
-            return []
-        if not lexical_docs:
-            return dense_docs[:limit]
-        if not dense_docs:
-            return lexical_docs[:limit]
-
-        dense_map = self._build_scored_doc_map(dense_docs)
-        lexical_map = self._build_scored_doc_map(lexical_docs)
-
-        combined: Dict[str, Dict[str, Any]] = {}
-        for key, payload in dense_map.items():
-            combined[key] = {"doc": payload["doc"], "dense": payload["score"], "lex": 0.0}
-        for key, payload in lexical_map.items():
-            entry = combined.setdefault(key, {"doc": payload["doc"], "dense": 0.0, "lex": 0.0})
-            entry["lex"] = max(entry["lex"], payload["score"])
-            if entry["doc"] is None:
-                entry["doc"] = payload["doc"]
-
-        fused: List[RetrievedDocument] = []
-        lexical_weight = max(0.0, min(1.0, 1.0 - dense_weight))
-        for payload in combined.values():
-            doc = payload["doc"]
-            fused_score = dense_weight * payload["dense"] + lexical_weight * payload["lex"]
-            doc.score = fused_score
-            fused.append(doc)
-
-        fused.sort(key=lambda d: getattr(d, "score", 0.0), reverse=True)
-        return fused[:limit]
+        return orchestrate_fuse_dense_and_lexical_results(
+            self,
+            dense_docs=dense_docs,
+            lexical_docs=lexical_docs,
+            limit=limit,
+            dense_weight=dense_weight,
+        )
 
     def _clamp_unit(self, value: Optional[float], fallback: float) -> float:
-        try:
-            parsed = float(value if value is not None else fallback)
-        except (TypeError, ValueError):
-            parsed = fallback
-        return max(0.0, min(1.0, parsed))
+        return orchestrate_clamp_unit(value, fallback)
 
     def compute_adaptive_history_weight(
         self,
@@ -463,24 +348,12 @@ class NLPController(BaseController):
         followup_similarity: Optional[float],
         followup_threshold: Optional[float],
     ) -> float:
-        base_weight = self._clamp_unit(
-            configured_weight,
-            getattr(self.app_settings, "RAG_HISTORY_WEIGHT", 0.75),
+        return orchestrate_compute_adaptive_history_weight(
+            self,
+            configured_weight=configured_weight,
+            followup_similarity=followup_similarity,
+            followup_threshold=followup_threshold,
         )
-        threshold = self._clamp_unit(
-            followup_threshold,
-            getattr(self.app_settings, "RAG_HISTORY_FOLLOWUP_SIM_THRESHOLD", 0.30),
-        )
-        conservative_weight = min(base_weight, 0.35)
-        if followup_similarity is None:
-            return conservative_weight
-        try:
-            similarity = float(followup_similarity)
-        except (TypeError, ValueError):
-            return conservative_weight
-        if similarity >= threshold:
-            return base_weight
-        return conservative_weight
 
     def fuse_query_and_history_results(
         self,
@@ -489,212 +362,37 @@ class NLPController(BaseController):
         limit: int,
         history_weight: float,
     ) -> List[RetrievedDocument]:
-        query_only_docs = query_only_docs or []
-        history_aware_docs = history_aware_docs or []
-        if not query_only_docs and not history_aware_docs:
-            return []
-        if not history_aware_docs:
-            return query_only_docs[:limit]
-        if not query_only_docs:
-            return history_aware_docs[:limit]
-
-        query_map = self._build_scored_doc_map(query_only_docs)
-        history_map = self._build_scored_doc_map(history_aware_docs)
-
-        fused_weight = self._clamp_unit(history_weight, 0.75)
-        query_weight = max(0.0, 1.0 - fused_weight)
-
-        combined: Dict[str, Dict[str, Any]] = {}
-        for key, payload in query_map.items():
-            combined[key] = {
-                "doc": payload["doc"],
-                "query_score": payload["score"],
-                "history_score": 0.0,
-            }
-        for key, payload in history_map.items():
-            entry = combined.setdefault(
-                key,
-                {
-                    "doc": payload["doc"],
-                    "query_score": 0.0,
-                    "history_score": 0.0,
-                },
-            )
-            entry["history_score"] = max(entry["history_score"], payload["score"])
-            if entry["doc"] is None:
-                entry["doc"] = payload["doc"]
-
-        fused: List[RetrievedDocument] = []
-        for payload in combined.values():
-            doc = payload["doc"]
-            score = (
-                query_weight * payload["query_score"]
-                + fused_weight * payload["history_score"]
-            )
-            doc.score = score
-            fused.append(doc)
-
-        fused.sort(key=lambda item: getattr(item, "score", 0.0), reverse=True)
-        return fused[:limit]
+        return orchestrate_fuse_query_and_history_results(
+            self,
+            query_only_docs=query_only_docs,
+            history_aware_docs=history_aware_docs,
+            limit=limit,
+            history_weight=history_weight,
+        )
 
     def build_conversation_context(
         self,
         chat_messages: Optional[List[Dict[str, str]]],
         max_turns: Optional[int] = None,
     ) -> str:
-        if not chat_messages:
-            return ""
-
-        turns = max_turns or getattr(self.app_settings, "RAG_HISTORY_MAX_TURNS", 8)
-        try:
-            turns = int(turns)
-        except (TypeError, ValueError):
-            turns = 8
-        turns = max(1, min(turns, 20))
-
-        selected = chat_messages[-turns:]
-        lines: List[str] = []
-        for idx, message in enumerate(selected, 1):
-            prompt = self.generation_client.process_text((message.get("prompt") or "").strip())
-            answer = self.generation_client.process_text((message.get("answer") or "").strip())
-            if prompt:
-                lines.append(f"User[{idx}]: {prompt}")
-            if answer:
-                lines.append(f"Assistant[{idx}]: {answer}")
-        return "\n".join(lines).strip()
+        return orchestrate_build_conversation_context(
+            self,
+            chat_messages=chat_messages,
+            max_turns=max_turns,
+        )
 
     def _default_answer_metadata(self) -> Dict[str, Any]:
-        return {
-            "needs_clarification": False,
-            "clarification_question": None,
-            "clarification_options": None,
-            "answer_confidence": None,
-            "ambiguity_reason": None,
-            "evidence_summary": None,
-        }
+        return orchestrate_default_answer_metadata(self)
 
     def _extract_json_object(self, text: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not text:
-            return None
-        raw = text.strip()
-        if not raw:
-            return None
-
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-
-        candidate = raw[start : end + 1]
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return None
-        return None
+        return orchestrate_extract_json_object(self, text)
 
     def _normalize_analysis_payload(
         self,
         payload: Optional[Dict[str, Any]],
         query: str,
     ) -> Dict[str, Any]:
-        normalized: Dict[str, Any] = {
-            "resolved_question": query,
-            "evidence_facts": [],
-            "candidate_answers": [],
-            "ambiguity_detected": False,
-            "ambiguity_reason": "",
-            "clarification_question": "",
-            "clarification_options": [],
-            "answer_confidence": 0.0,
-        }
-        if not payload:
-            return normalized
-
-        resolved_question = payload.get("resolved_question")
-        if isinstance(resolved_question, str) and resolved_question.strip():
-            normalized["resolved_question"] = resolved_question.strip()
-
-        facts = payload.get("evidence_facts")
-        if isinstance(facts, list):
-            cleaned_facts = []
-            for item in facts:
-                if not isinstance(item, dict):
-                    continue
-                fact_text = str(item.get("fact") or "").strip()
-                if not fact_text:
-                    continue
-                support = item.get("support")
-                if not isinstance(support, list):
-                    support = []
-                support = [str(s).strip() for s in support if str(s).strip()]
-                confidence = self._clamp_unit(item.get("confidence"), 0.5)
-                cleaned_facts.append(
-                    {
-                        "fact": fact_text,
-                        "support": support,
-                        "confidence": confidence,
-                    }
-                )
-            normalized["evidence_facts"] = cleaned_facts
-
-        candidates = payload.get("candidate_answers")
-        if isinstance(candidates, list):
-            cleaned_candidates = []
-            for item in candidates:
-                if not isinstance(item, dict):
-                    continue
-                answer_text = str(item.get("answer") or "").strip()
-                if not answer_text:
-                    continue
-                support_count_raw = item.get("support_count")
-                try:
-                    support_count = int(support_count_raw) if support_count_raw is not None else 0
-                except (TypeError, ValueError):
-                    support_count = 0
-                confidence = self._clamp_unit(item.get("confidence"), 0.5)
-                cleaned_candidates.append(
-                    {
-                        "answer": answer_text,
-                        "support_count": max(0, support_count),
-                        "confidence": confidence,
-                    }
-                )
-            cleaned_candidates.sort(key=lambda rec: rec.get("confidence", 0.0), reverse=True)
-            normalized["candidate_answers"] = cleaned_candidates
-
-        normalized["ambiguity_detected"] = bool(payload.get("ambiguity_detected", False))
-        ambiguity_reason = payload.get("ambiguity_reason")
-        if isinstance(ambiguity_reason, str):
-            normalized["ambiguity_reason"] = ambiguity_reason.strip()
-        clarification_question = payload.get("clarification_question")
-        if isinstance(clarification_question, str):
-            normalized["clarification_question"] = clarification_question.strip()
-        clarification_options = payload.get("clarification_options")
-        if isinstance(clarification_options, list):
-            normalized["clarification_options"] = [
-                str(option).strip()
-                for option in clarification_options
-                if str(option).strip()
-            ]
-
-        top_confidence = 0.0
-        if normalized["candidate_answers"]:
-            top_confidence = float(normalized["candidate_answers"][0].get("confidence") or 0.0)
-        normalized["answer_confidence"] = self._clamp_unit(
-            payload.get("answer_confidence"),
-            top_confidence,
-        )
-
-        return normalized
+        return orchestrate_normalize_analysis_payload(self, payload, query)
 
     def _build_heuristic_analysis(
         self,
@@ -703,109 +401,19 @@ class NLPController(BaseController):
         asset_labels: Optional[Dict[int, str]] = None,
         asset_labels_by_name: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        heuristic = self._normalize_analysis_payload({}, query)
-        facts: List[Dict[str, Any]] = []
-        candidates: List[Dict[str, Any]] = []
-        max_docs = min(4, len(documents))
-
-        for idx, doc in enumerate(documents[:max_docs]):
-            text_value = (getattr(doc, "text", "") or "").strip()
-            if not text_value:
-                continue
-
-            doc_label = self._resolve_document_label(
-                getattr(doc, "metadata", None),
-                fallback_label=f"Document {idx + 1}",
-                asset_labels=asset_labels,
-                asset_labels_by_name=asset_labels_by_name,
-            )
-            snippet = re.sub(r"\s+", " ", text_value)[:220].strip()
-            score = self._clamp_unit(getattr(doc, "score", None), 0.5)
-            facts.append(
-                {
-                    "fact": snippet,
-                    "support": [doc_label],
-                    "confidence": score,
-                }
-            )
-            candidates.append(
-                {
-                    "answer": snippet,
-                    "support_count": 1,
-                    "confidence": score,
-                }
-            )
-
-        heuristic["evidence_facts"] = facts
-        candidates.sort(key=lambda rec: rec["confidence"], reverse=True)
-        heuristic["candidate_answers"] = candidates
-        heuristic["answer_confidence"] = candidates[0]["confidence"] if candidates else 0.0
-        return heuristic
+        return orchestrate_build_heuristic_analysis(
+            self,
+            query=query,
+            documents=documents,
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
+        )
 
     def _build_evidence_summary(self, analysis: Dict[str, Any]) -> str:
-        facts = analysis.get("evidence_facts") or []
-        if not isinstance(facts, list) or not facts:
-            candidates = analysis.get("candidate_answers") or []
-            if isinstance(candidates, list) and candidates:
-                top = candidates[0].get("answer")
-                if isinstance(top, str) and top.strip():
-                    return top.strip()
-            return ""
-
-        lines: List[str] = []
-        for fact in facts[:4]:
-            if not isinstance(fact, dict):
-                continue
-            fact_text = str(fact.get("fact") or "").strip()
-            if not fact_text:
-                continue
-            support = fact.get("support")
-            support_str = ""
-            if isinstance(support, list) and support:
-                support_str = f" ({', '.join([str(s) for s in support[:2]])})"
-            lines.append(f"- {fact_text}{support_str}")
-        return "\n".join(lines).strip()
+        return orchestrate_build_evidence_summary(self, analysis)
 
     def _extract_conflict_signatures(self, text: str) -> List[tuple[str, str]]:
-        content = str(text or "").strip()
-        if not content:
-            return []
-
-        signatures: List[tuple[str, str]] = []
-        lower = content.lower()
-
-        # Date-like values (YYYY-MM-DD / DD/MM/YYYY / YYYY)
-        for match in re.findall(r"\b\d{1,4}[-/]\d{1,2}[-/]\d{1,4}\b", lower):
-            signatures.append(("date", match))
-        for match in re.findall(r"\b(19|20)\d{2}\b", lower):
-            signatures.append(("year", match))
-
-        # Number-like values
-        for match in re.findall(r"\b\d+(?:[.,]\d+)?\b", lower):
-            signatures.append(("number", match.replace(",", "")))
-
-        # Name-like values (quoted phrases or two-token person/org style text)
-        for match in re.findall(r"[\"“”'«»]([^\"“”'«»]{2,80})[\"“”'«»]", content):
-            cleaned = re.sub(r"\s+", " ", match).strip().lower()
-            if cleaned and not re.search(r"\d", cleaned):
-                signatures.append(("name", cleaned))
-
-        latin_name_match = re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", content)
-        if latin_name_match:
-            signatures.append(("name", latin_name_match.group(0).strip().lower()))
-
-        arabic_name_match = re.search(r"[\u0600-\u06FF]{2,}(?:\s+[\u0600-\u06FF]{2,})+", content)
-        if arabic_name_match:
-            signatures.append(("name", arabic_name_match.group(0).strip().lower()))
-
-        unique = []
-        seen = set()
-        for sig in signatures:
-            if sig in seen:
-                continue
-            seen.add(sig)
-            unique.append(sig)
-        return unique
+        return orchestrate_extract_conflict_signatures(self, text)
 
     def _has_key_value_conflict(
         self,
@@ -813,55 +421,18 @@ class NLPController(BaseController):
         threshold: float,
         top_conf: float,
     ) -> bool:
-        typed_values: Dict[str, set[str]] = {"date": set(), "year": set(), "number": set(), "name": set()}
-
-        candidates = analysis.get("candidate_answers") or []
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            conf = float(candidate.get("confidence") or 0.0)
-            if conf < max(0.0, top_conf - threshold):
-                continue
-            text = str(candidate.get("answer") or "").strip()
-            for sig_type, sig_value in self._extract_conflict_signatures(text):
-                typed_values.setdefault(sig_type, set()).add(sig_value)
-
-        facts = analysis.get("evidence_facts") or []
-        for fact in facts:
-            if not isinstance(fact, dict):
-                continue
-            conf = self._clamp_unit(fact.get("confidence"), 0.5)
-            if conf < max(0.0, top_conf - threshold):
-                continue
-            text = str(fact.get("fact") or "").strip()
-            for sig_type, sig_value in self._extract_conflict_signatures(text):
-                typed_values.setdefault(sig_type, set()).add(sig_value)
-
-        return any(len(values) > 1 for values in typed_values.values())
+        return orchestrate_has_key_value_conflict(
+            self,
+            analysis=analysis,
+            threshold=threshold,
+            top_conf=top_conf,
+        )
 
     def _compact_clarification_option(self, text: str, max_len: int = 90) -> str:
-        value = re.sub(r"\s+", " ", str(text or "")).strip()
-        if not value:
-            return ""
-        parts = re.split(r"[\.!\?؟؛\n]+", value)
-        for part in parts:
-            cleaned = part.strip()
-            if cleaned:
-                value = cleaned
-                break
-        if len(value) > max_len:
-            value = value[: max_len - 1].rstrip() + "…"
-        return value
+        return orchestrate_compact_clarification_option(self, text, max_len=max_len)
 
     def _derive_clarification_option(self, answer_text: str) -> str:
-        value = str(answer_text or "").strip()
-        if not value:
-            return ""
-        signatures = self._extract_conflict_signatures(value)
-        for sig_type, sig_value in signatures:
-            if sig_type in {"date", "year", "number", "name"} and sig_value:
-                return self._compact_clarification_option(sig_value, max_len=60)
-        return self._compact_clarification_option(value)
+        return orchestrate_derive_clarification_option(self, answer_text)
 
     def _apply_ambiguity_gate(
         self,
@@ -870,97 +441,13 @@ class NLPController(BaseController):
         ambiguity_threshold: Optional[float],
         top_n: Optional[int],
     ) -> Dict[str, Any]:
-        threshold = self._clamp_unit(
-            ambiguity_threshold,
-            getattr(self.app_settings, "RAG_AMBIGUITY_THRESHOLD", 0.12),
-        )
-        configured_top_n = top_n or getattr(self.app_settings, "RAG_AMBIGUITY_TOP_N", 4)
-        try:
-            configured_top_n = int(configured_top_n)
-        except (TypeError, ValueError):
-            configured_top_n = 4
-        configured_top_n = max(2, min(configured_top_n, 10))
-
-        candidates = analysis.get("candidate_answers")
-        if not isinstance(candidates, list):
-            candidates = []
-        candidates = sorted(
-            [c for c in candidates if isinstance(c, dict)],
-            key=lambda rec: float(rec.get("confidence") or 0.0),
-            reverse=True,
-        )
-        analysis["candidate_answers"] = candidates
-
-        top_conf = float(candidates[0].get("confidence") or 0.0) if candidates else 0.0
-        second_conf = float(candidates[1].get("confidence") or 0.0) if len(candidates) > 1 else 0.0
-        confidence_gap = top_conf - second_conf
-
-        conflict_pool = candidates[:configured_top_n]
-        unique_top_answers = {
-            str(item.get("answer") or "").strip().lower()
-            for item in conflict_pool
-            if str(item.get("answer") or "").strip()
-            and float(item.get("confidence") or 0.0) >= max(0.0, top_conf - threshold)
-        }
-        competing_candidates = len(unique_top_answers) > 1
-        weak_separation = len(candidates) > 1 and confidence_gap <= threshold
-        key_value_conflict = self._has_key_value_conflict(
+        return orchestrate_apply_ambiguity_gate(
+            self,
             analysis=analysis,
-            threshold=threshold,
-            top_conf=top_conf,
+            query=query,
+            ambiguity_threshold=ambiguity_threshold,
+            top_n=top_n,
         )
-
-        ambiguity_detected = bool(analysis.get("ambiguity_detected", False))
-        if competing_candidates or weak_separation or key_value_conflict:
-            ambiguity_detected = True
-
-        if ambiguity_detected and not str(analysis.get("ambiguity_reason") or "").strip():
-            if weak_separation:
-                analysis["ambiguity_reason"] = "Multiple candidates have close confidence scores."
-            elif key_value_conflict:
-                analysis["ambiguity_reason"] = "Evidence contains conflicting key values (such as dates, numbers, or names)."
-            elif competing_candidates:
-                analysis["ambiguity_reason"] = "Multiple evidence sections support different plausible answers."
-            else:
-                analysis["ambiguity_reason"] = "Evidence appears ambiguous."
-
-        if ambiguity_detected:
-            clarification_question = str(analysis.get("clarification_question") or "").strip()
-            if not clarification_question:
-                has_arabic = bool(re.search(r"[\u0600-\u06FF]", query or ""))
-                clarification_question = (
-                    "هل يمكنك تحديد أي خيار تقصده بدقة؟"
-                    if has_arabic
-                    else "Could you clarify which exact option you mean?"
-                )
-                analysis["clarification_question"] = clarification_question
-
-            options = analysis.get("clarification_options")
-            if not isinstance(options, list):
-                options = []
-            cleaned_options = [
-                self._compact_clarification_option(str(opt))
-                for opt in options
-                if self._compact_clarification_option(str(opt))
-            ]
-            if not cleaned_options:
-                for item in conflict_pool:
-                    value = self._derive_clarification_option(
-                        str(item.get("answer") or "").strip()
-                    )
-                    if value and value not in cleaned_options:
-                        cleaned_options.append(value)
-                    if len(cleaned_options) >= 4:
-                        break
-            analysis["clarification_options"] = cleaned_options
-
-        analysis["ambiguity_detected"] = ambiguity_detected
-        analysis["answer_confidence"] = self._clamp_unit(
-            analysis.get("answer_confidence"),
-            top_conf,
-        )
-        analysis["evidence_summary"] = self._build_evidence_summary(analysis)
-        return analysis
 
     async def analyze_evidence_for_answer(
         self,
@@ -973,136 +460,18 @@ class NLPController(BaseController):
         asset_labels: Optional[Dict[int, str]] = None,
         asset_labels_by_name: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        if not retrieved_documents:
-            analysis = self._normalize_analysis_payload({}, query)
-            analysis["evidence_summary"] = ""
-            analysis["__analysis_source"] = "empty"
-            analysis["__analysis_parse_failed"] = False
-            return analysis
-
-        max_docs = getattr(
-            self.app_settings,
-            "RAG_EVIDENCE_SYNTHESIS_MAX_DOCS",
-            EVIDENCE_DOC_LIMIT,
-        )
-        try:
-            max_docs = int(max_docs)
-        except (TypeError, ValueError):
-            max_docs = EVIDENCE_DOC_LIMIT
-        max_docs = max(1, min(max_docs, 20))
-
-        evidence_docs = list(retrieved_documents[:max_docs])
-        context_text = conversation_context or self.build_conversation_context(chat_messages)
-        use_llm_analysis = bool(
-            getattr(self.app_settings, "RAG_EVIDENCE_SYNTHESIS_ENABLED", True)
-        )
-
-        parsed_analysis: Optional[Dict[str, Any]] = None
-        if use_llm_analysis:
-            try:
-                system_prompt = self.template_parser.get(template_group, "analysis_system_prompt", {}) or (
-                    "You are an evidence analyst. Return strict JSON only."
-                )
-
-                sections: List[str] = []
-                char_budget = EVIDENCE_CHAR_BUDGET
-                for idx, doc in enumerate(evidence_docs):
-                    if char_budget <= 0:
-                        break
-                    chunk_text = (getattr(doc, "text", "") or "").strip()
-                    if not chunk_text:
-                        continue
-                    chunk_text = self.generation_client.process_text(chunk_text)
-                    if len(chunk_text) > char_budget:
-                        chunk_text = chunk_text[:char_budget]
-                    char_budget -= len(chunk_text)
-                    doc_label = self._resolve_document_label(
-                        getattr(doc, "metadata", None),
-                        fallback_label=f"Document {idx + 1}",
-                        asset_labels=asset_labels,
-                        asset_labels_by_name=asset_labels_by_name,
-                    )
-                    section = self.template_parser.get(
-                        template_group,
-                        "document_prompt",
-                        {"doc_label": doc_label, "chunk_text": chunk_text},
-                    ) or f"## Document: {doc_label}\n{chunk_text}"
-                    sections.append(section)
-
-                analysis_footer = self.template_parser.get(
-                    template_group,
-                    "analysis_footer_prompt",
-                    {
-                        "query": query,
-                        "conversation_context": context_text or "",
-                    },
-                ) or (
-                    "Return strict JSON with keys: resolved_question, evidence_facts, "
-                    "candidate_answers, ambiguity_detected, ambiguity_reason, "
-                    "clarification_question, clarification_options, answer_confidence."
-                )
-
-                analysis_prompt = "\n\n".join(
-                    [part for part in ["\n".join(sections), analysis_footer] if part]
-                )
-                analysis_chat_history = [
-                    self.generation_client.construct_prompt(
-                        prompt=system_prompt,
-                        role=self.generation_client.enums.SYSTEM.value,
-                    )
-                ]
-                raw_analysis = self.generation_client.generate_text(
-                    prompt=analysis_prompt,
-                    chat_history=analysis_chat_history,
-                    temperature=0.0,
-                )
-                parsed_analysis = self._extract_json_object(raw_analysis)
-
-                if parsed_analysis is None:
-                    retry_prompt = (
-                        analysis_prompt
-                        + "\n\nImportant: return one valid JSON object only. No markdown, no prose."
-                    )
-                    retry_output = self.generation_client.generate_text(
-                        prompt=retry_prompt,
-                        chat_history=analysis_chat_history,
-                        temperature=0.0,
-                    )
-                    parsed_analysis = self._extract_json_object(retry_output)
-            except Exception as exc:
-                logger.error("Evidence analysis stage failed: %s", exc)
-                parsed_analysis = None
-
-        if parsed_analysis is None:
-            normalized = self._build_heuristic_analysis(
-                query=query,
-                documents=evidence_docs,
-                asset_labels=asset_labels,
-                asset_labels_by_name=asset_labels_by_name,
-            )
-            normalized["__analysis_source"] = "heuristic"
-            normalized["__analysis_parse_failed"] = bool(use_llm_analysis)
-        else:
-            normalized = self._normalize_analysis_payload(parsed_analysis, query)
-            normalized["__analysis_source"] = "llm"
-            normalized["__analysis_parse_failed"] = False
-
-        logger.info(
-            "RAG_ANALYSIS_PARSE template=%s used_llm=%s parse_failed=%s source=%s docs=%d",
-            template_group,
-            bool(use_llm_analysis),
-            bool(normalized.get("__analysis_parse_failed", False)),
-            normalized.get("__analysis_source"),
-            len(evidence_docs),
-        )
-
-        return self._apply_ambiguity_gate(
-            analysis=normalized,
+        return await orchestrate_analyze_evidence_for_answer(
+            self,
             query=query,
+            retrieved_documents=retrieved_documents,
+            chat_messages=chat_messages,
+            conversation_context=conversation_context,
+            template_group=template_group,
             ambiguity_threshold=ambiguity_threshold,
-            top_n=getattr(self.app_settings, "RAG_AMBIGUITY_TOP_N", 4),
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
         )
-    
+
     async def index_into_vector_db(
         self,
         project: Project,
@@ -1187,468 +556,25 @@ class NLPController(BaseController):
         asset_ids: Optional[List[int]] = None,
         keywords: Optional[List[str]] = None,
     ):
-
-        # step1: get collection name
-        query_vector = None
-        collection_name = self.create_collection_name(project_id=project.project_id)
-
-        # step2: get text embedding vector
-        vectors = self.embedding_client.embed_text(text=text, 
-                                                 document_type=DocumentTypeEnum.QUERY.value)
-
-        if not vectors or len(vectors) == 0:
-            return False
-        
-        if isinstance(vectors, list) and len(vectors) > 0:
-            query_vector = vectors[0]
-
-        if not query_vector:
-            return False  
-
-        # step3: do semantic search
-        results = await self.vectordb_client.search_by_vector(
-            collection_name=collection_name,
-            vector=query_vector,
-            limit=limit
+        return await orchestrate_search_vector_db_collection(
+            self,
+            project=project,
+            text=text,
+            limit=limit,
+            doc_types=doc_types,
+            asset_ids=asset_ids,
+            keywords=keywords,
         )
-
-        if not results:
-            results = []
-
-        lexical_results: List[RetrievedDocument] = []
-        text_query = self._build_lexical_query(text or "")
-        if text_query:
-            # Prefer Elasticsearch for lexical retrieval when available.
-            if self.search_client is not None:
-                try:
-                    index_name = self.search_client.get_index_name(project.project_id)
-                    filters: Dict[str, Any] = {"project_id": project.project_id}
-                    es_hits = await self.search_client.search(
-                        index_name=index_name,
-                        query=text_query,
-                        filters=filters,
-                        size=limit,
-                    )
-                    for hit in es_hits:
-                        text_value = hit.get("text") or ""
-                        score_value = float(hit.get("_score") or 0.0)
-                        meta: Dict[str, Any] = hit.get("metadata") or {}
-                        # Ensure key metadata fields are available for downstream filters.
-                        for key in (
-                            "asset_id",
-                            "doc_type",
-                            "document_type",
-                            "chunk_id",
-                            "page",
-                            "page_number",
-                            "original_filename",
-                        ):
-                            if key not in meta and key in hit:
-                                meta[key] = hit.get(key)
-
-                        lexical_results.append(
-                            RetrievedDocument(
-                                text=text_value,
-                                score=score_value,
-                                metadata=meta,
-                            )
-                        )
-                except Exception as exc:
-                    logger.error("Elasticsearch lexical search failed: %s", exc)
-            else:
-                lexical_results = await self.vectordb_client.search_by_text(
-                    collection_name=collection_name,
-                    query=text_query,
-                    limit=limit
-                )
-
-        dense_weight = getattr(self.app_settings, "RETRIEVAL_DENSE_WEIGHT", 0.6)
-        try:
-            dense_weight = float(dense_weight)
-        except (TypeError, ValueError):
-            dense_weight = 0.6
-        results = self._fuse_dense_and_lexical_results(
-            results,
-            lexical_results,
-            limit,
-            dense_weight=dense_weight,
-        )
-        if not results:
-            return []
-
-        if doc_types:
-            doc_types_normalized = {dt.lower() for dt in doc_types}
-            filtered_results = []
-            for result in results:
-                metadata = getattr(result, "metadata", None)
-                chunk_type = None
-                if isinstance(metadata, dict):
-                    chunk_type = metadata.get("doc_type", metadata.get("document_type"))
-                elif metadata is not None and hasattr(metadata, "get"):
-                    chunk_type = metadata.get("doc_type")
-
-                # Prefer matching doc_type, but do not drop chunks that
-                # lack doc_type metadata (for backward compatibility with
-                # older indexed data).
-                if chunk_type and chunk_type.lower() in doc_types_normalized:
-                    filtered_results.append(result)
-                elif chunk_type is None:
-                    filtered_results.append(result)
-
-            if filtered_results:
-                results = filtered_results
-            else:
-                return []
-
-        if asset_ids:
-            asset_id_set = {int(asset_id) for asset_id in asset_ids if asset_id is not None}
-            filtered_results = []
-            for result in results:
-                metadata = getattr(result, "metadata", None)
-                metadata_asset_id = None
-                if isinstance(metadata, dict):
-                    metadata_asset_id = metadata.get("asset_id")
-                elif metadata is not None and hasattr(metadata, "get"):
-                    metadata_asset_id = metadata.get("asset_id")
-
-                if metadata_asset_id is not None:
-                    try:
-                        if int(metadata_asset_id) in asset_id_set:
-                            filtered_results.append(result)
-                    except (ValueError, TypeError):
-                        continue
-
-            if filtered_results:
-                results = filtered_results
-            else:
-                return []
-
-        # Optional keyword / lexical filtering: keep hits that contain at least
-        # one of the query keywords, if provided.
-        if keywords:
-            normalized_keywords = [kw.strip().lower() for kw in keywords if kw and kw.strip()]
-            if normalized_keywords:
-                filtered_results = []
-                for result in results:
-                    text_value = getattr(result, "text", "") or ""
-                    t_lower = text_value.lower()
-                    if any(kw in t_lower for kw in normalized_keywords):
-                        filtered_results.append(result)
-
-                if filtered_results:
-                    results = filtered_results
-
-        return results
 
     async def rerank_documents(self, query: str, documents: List[Any]) -> List[Any]:
-        """
-        Optionally rerank the retrieved documents using an external cross-encoder.
-        """
-        if (
-            not query
-            or not documents
-            or not self.reranker_client
-            or self.reranker_max_candidates <= 0
-        ):
-            return documents
-
-        limit = min(self.reranker_max_candidates, len(documents))
-        candidate_texts: List[str] = []
-        for doc in documents[:limit]:
-            text_value = getattr(doc, "text", "") or ""
-            candidate_texts.append(text_value.strip())
-
-        if not any(candidate_texts):
-            return documents
-
-        start_time = time.perf_counter()
-        try:
-            rerank_scores = await self.reranker_client.rerank(
-                query=query,
-                documents=candidate_texts,
-                top_n=limit,
-            )
-        except Exception as exc:
-            logger.error("Reranker call failed: %s", exc)
-            return documents
-
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        logger.debug(
-            "Reranked %s candidates in %d ms", len(candidate_texts), duration_ms
-        )
-
-        if not rerank_scores:
-            return documents
-
-        score_lookup: Dict[int, float] = {}
-        for entry in rerank_scores:
-            idx = entry.get("index")
-            if idx is None:
-                continue
-            try:
-                idx_int = int(idx)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= idx_int < limit:
-                score_lookup[idx_int] = float(entry.get("score") or 0.0)
-
-        if not score_lookup:
-            return documents
-
-        ranked_slice = sorted(
-            range(limit),
-            key=lambda idx: score_lookup.get(idx, float("-inf")),
-            reverse=True,
-        )
-        reordered = [documents[idx] for idx in ranked_slice]
-        if limit < len(documents):
-            reordered.extend(documents[limit:])
-        return reordered
+        return await orchestrate_rerank_documents(self, query=query, documents=documents)
 
     def _try_extract_direct_answer(self, query: str, documents: List[Any], question_type: str) -> Optional[str]:
-        """
-        Lightweight, retrieval-side extraction of very simple factual answers
-        (dates, simple purposes) from the retrieved documents before passing
-        everything to the LLM. Intended to be language-agnostic for Arabic
-        and English where possible.
-        """
-        if not query or not documents or not question_type:
-            return None
-
-        corpus = "\n".join(
-            (getattr(doc, "text", "") or "") for doc in documents
+        return orchestrate_try_extract_direct_answer(
+            query=query,
+            documents=documents,
+            question_type=question_type,
         )
-        if not corpus:
-            return None
-        if question_type == "when":
-            # Tightened logic: only treat a date as a direct answer if it
-            # appears in a sentence that also shares at least one content
-            # token with the question (after stripping generic question
-            # words). This avoids grabbing arbitrary dates from unrelated
-            # parts of the corpus.
-            sentences = re.split(r"[\.!\?؟\n]+", corpus)
-            lowered_query = (query or "").lower()
-            stop_tokens = {"متى", "when", "?", "؟"}
-            query_tokens = [
-                tok
-                for tok in re.findall(r"\w+", lowered_query, flags=re.UNICODE)
-                if tok not in stop_tokens and len(tok) > 2
-            ]
-
-            best_candidate = None
-            best_overlap = 0
-
-            for sent in sentences:
-                s = sent.strip()
-                if not s:
-                    continue
-                low = s.lower()
-                m = DATE_REGEX.search(low)
-                if not m:
-                    continue
-                date_candidate = m.group(1).strip()
-                if not date_candidate:
-                    continue
-
-                overlap = 0
-                for tok in query_tokens:
-                    if tok in low:
-                        overlap += 1
-
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_candidate = date_candidate
-
-            if best_candidate and best_overlap > 0:
-                return best_candidate
-            return None
-
-        if question_type == "why":
-            # Split corpus into coarse sentences.
-            sentences = re.split(r"[\.!\?؟\n]+", corpus)
-
-            def normalize_arabic(text: str) -> str:
-                """Light normalization to make OCR variants more robust."""
-                # Strip diacritics and tatweel
-                text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
-                # Normalize common alef forms and taa marbuta / ya
-                text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-                text = text.replace("ى", "ي").replace("ة", "ه")
-                # Collapse whitespace
-                text = re.sub(r"\s+", " ", text)
-                return text
-
-            # Travel-related verbs / phrases (normalized Arabic + English).
-            travel_keywords = [
-                "سافر", "ذهب", "توجه", "زار", "رحل",  # Arabic verbs
-                "سفر", "زيارة",
-                "traveled", "travelled", "went", "visited", "journeyed",
-            ]
-
-            # Purpose pattern: "ل" + 2–8 Arabic letters, then a meeting-like noun.
-            purpose_pattern = re.compile(
-                r"(ل[اأإآبتثجحخدذرزسشصضطظعغفقكلمنهوي]{2,8}\s*"
-                r"(?:اجتماع|اجتماعا|مؤتمر|قمة|لقاء|meeting|summit|conference))",
-                flags=re.IGNORECASE,
-            )
-
-            # Basic purpose triggers as a fallback matcher (more general).
-            triggers = [
-                # Arabic purpose / cause markers (normalized)
-                "لحضور", "لحض", "للمشاركة", "لتقديم", "للتفاوض", "لعقد",
-                "من اجل", "بهدف", "لان", "لأن", "بسبب", "نتيجه", "نتيجة",
-                # English purpose / cause markers
-                "to attend", "in order to", "for the purpose of",
-                "because", "because of", "due to", "as a result of",
-            ]
-
-            lowered_query = (query or "").lower()
-            normalized_query = normalize_arabic(lowered_query)
-
-            # Ignore generic question words.
-            stop_tokens = {"لماذا", "why", "?", "؟"}
-            query_tokens = [
-                tok
-                for tok in re.findall(r"\w+", normalized_query, flags=re.UNICODE)
-                if tok not in stop_tokens and len(tok) > 2
-            ]
-
-            # First pass: pattern-based extraction bound to travel + query context.
-            for sent in sentences:
-                s = sent.strip()
-                if not s:
-                    continue
-
-                low = s.lower()
-                norm = normalize_arabic(low)
-
-                # Require at least one travel-related keyword.
-                if not any(tv in norm for tv in travel_keywords):
-                    continue
-
-                # Prefer sentences that share some tokens with the query.
-                if query_tokens and not any(tok in norm for tok in query_tokens):
-                    continue
-
-                # Look for an explicit "ل + noun/verb" purpose fragment.
-                m = purpose_pattern.search(low)
-                if m:
-                    start = m.start()
-                    # Extract until the next major punctuation mark.
-                    tail = s[start:]
-                    p = re.search(r"[\.!\?؟]", tail)
-                    end = start + p.start() if p else len(s)
-                    reason_fragment = s[start:end].strip()
-                    if reason_fragment:
-                        return reason_fragment
-
-            # Fallback: trigger-based sentence scoring (legacy behavior, but
-            # using normalized text for robustness).
-            best_sentence = None
-            for sent in sentences:
-                s = sent.strip()
-                if not s:
-                    continue
-                low = s.lower()
-                norm = normalize_arabic(low)
-                if any(trigger in norm for trigger in triggers):
-                    # Prefer sentences that share some tokens with the query.
-                    if query_tokens and any(tok in norm for tok in query_tokens):
-                        best_sentence = s
-                        break
-                    if best_sentence is None:
-                        best_sentence = s
-
-            if best_sentence:
-                return best_sentence.strip()
-
-        if question_type == "where":
-            # Very lightweight extraction of a location-bearing sentence with
-            # simple scoring instead of first match, to reduce misfires.
-            sentences = re.split(r"[\.!\?؟\n]+", corpus)
-
-            def normalize_arabic(text: str) -> str:
-                text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
-                text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-                text = text.replace("ى", "ي").replace("ة", "ه")
-                text = re.sub(r"\s+", " ", text)
-                return text
-
-            lowered_query = (query or "").lower()
-            norm_query = normalize_arabic(lowered_query)
-            stop_tokens = {"اين", "أين", "where", "?", "؟"}
-            query_tokens = [
-                tok
-                for tok in re.findall(r"\w+", norm_query, flags=re.UNICODE)
-                if tok not in stop_tokens and len(tok) > 2
-            ]
-
-            location_markers = ["في ", "في-", "الى ", "إلى ", "near", " in ", " at ", " to "]
-
-            best_sentence = None
-            best_score = 0
-            for sent in sentences:
-                s = sent.strip()
-                if not s:
-                    continue
-                low = s.lower()
-                norm = normalize_arabic(low)
-
-                score = 0
-                if any(marker in norm for marker in location_markers):
-                    score += 1
-
-                overlap = 0
-                for tok in query_tokens:
-                    if tok in norm:
-                        overlap += 1
-                score += overlap
-
-                if score > best_score:
-                    best_score = score
-                    best_sentence = s
-
-            if best_sentence and best_score > 0:
-                return best_sentence.strip()
-
-        if question_type == "how_many":
-            # Simple numeric extraction: look for a sentence with a number and
-            # some overlap with the query, preferring higher overlap.
-            sentences = re.split(r"[\.!\?؟\n]+", corpus)
-            lowered_query = (query or "").lower()
-            stop_tokens = {"كم", "how", "many", "?", "؟"}
-            query_tokens = [
-                tok
-                for tok in re.findall(r"\w+", lowered_query, flags=re.UNICODE)
-                if tok not in stop_tokens and len(tok) > 2
-            ]
-
-            numeric_pattern = re.compile(r"\d+")
-
-            best_sentence = None
-            best_score = 0
-            for sent in sentences:
-                s = sent.strip()
-                if not s:
-                    continue
-                low = s.lower()
-                if not numeric_pattern.search(low):
-                    continue
-
-                overlap = 0
-                for tok in query_tokens:
-                    if tok in low:
-                        overlap += 1
-
-                if overlap > best_score:
-                    best_score = overlap
-                    best_sentence = s
-
-            if best_sentence and best_score > 0:
-                return best_sentence.strip()
-
-        # Other types could be added here (where, who) as needed.
-        return None
 
     async def answer_rag_question(self, project: Project, query: str, limit: int = 10,
                             chat_messages: Optional[List[Dict[str, str]]] = None,
