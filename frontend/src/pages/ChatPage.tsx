@@ -36,6 +36,9 @@ interface HistoryMessage {
   role: ChatRole;
   content: string;
   sources?: MessageSource[];
+  needs_clarification?: boolean;
+  clarification_question?: string | null;
+  clarification_options?: string[];
   timestamp?: string | null;
 }
 
@@ -527,8 +530,9 @@ export const ChatPage: React.FC = () => {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || isStreaming) return;
+  const handleSend = async (overrideText?: string) => {
+    const textToSend = (overrideText ?? input).trim();
+    if (!textToSend || isStreaming) return;
     const modeForRequest = chatMode;
     const sendingRegular = modeForRequest === 'regular';
     const sendingMultihop = modeForRequest === 'multihop';
@@ -538,7 +542,7 @@ export const ChatPage: React.FC = () => {
     }
     setDocTypeError(null);
     setModeError(null);
-    const userText = input.trim();
+    const userText = textToSend;
     setInput('');
 
     const userMsg: HistoryMessage = {
@@ -624,12 +628,25 @@ export const ChatPage: React.FC = () => {
             assistantId = newId;
           }
           if (final && typeof final.answer === 'string') {
+            const clarificationOptions = Array.isArray((final as any).clarification_options)
+              ? ((final as any).clarification_options as any[])
+                  .map(item => String(item || '').trim())
+                  .filter(Boolean)
+              : [];
+            const needsClarification = Boolean((final as any).needs_clarification);
+            const clarificationQuestion =
+              typeof (final as any).clarification_question === 'string'
+                ? (final as any).clarification_question
+                : null;
             setMessages(prev =>
               prev.map(m =>
                 m.id === assistantId
                   ? {
                       ...m,
                       content: final.answer as string,
+                      needs_clarification: needsClarification,
+                      clarification_question: clarificationQuestion,
+                      clarification_options: clarificationOptions,
                       sources: Array.isArray(final.sources)
                         ? (final.sources as any)
                         : m.sources
@@ -1295,6 +1312,34 @@ export const ChatPage: React.FC = () => {
                           renderAsMarkdown={m.role === 'assistant'}
                           copyMode={m.role === 'assistant' ? 'plain_text' : 'raw_markdown'}
                         />
+                        {m.role === 'assistant' &&
+                          m.needs_clarification &&
+                          Array.isArray(m.clarification_options) &&
+                          m.clarification_options.length > 0 && (
+                            <div className="pl-4 md:pl-10">
+                              <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-4 py-3 text-sm text-slate-700 space-y-2">
+                                {m.clarification_question && (
+                                  <div className="text-xs text-slate-600">
+                                    {m.clarification_question}
+                                  </div>
+                                )}
+                                <div className="flex flex-wrap gap-2">
+                                  {m.clarification_options.map((option, idx) => (
+                                    <button
+                                      key={`${m.id}-clarify-${idx}`}
+                                      type="button"
+                                      className="rounded-full border border-[color:var(--border-subtle)] bg-white px-3 py-1 text-xs text-slate-700 hover:border-[color:var(--accent)] hover:text-[color:var(--accent-strong)]"
+                                      onClick={() => {
+                                        void handleSend(option);
+                                      }}
+                                    >
+                                      {option}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
                   {!isRegularMode &&
                     m.role === 'assistant' &&
                     m.sources &&

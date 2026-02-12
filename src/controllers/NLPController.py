@@ -4,9 +4,14 @@ import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
-from types import SimpleNamespace
 
 from .BaseController import BaseController
+from .nlp_generation_orchestrator import (
+    generate_multihop_rag_answer as orchestrate_generate_multihop_rag_answer,
+    generate_rag_answer_from_documents as orchestrate_generate_rag_answer_from_documents,
+    generate_regular_chat_response as orchestrate_generate_regular_chat_response,
+    summarize_chunks as orchestrate_summarize_chunks,
+)
 from models.db_schemes import DataChunk, Project, RetrievedDocument
 from stores.llm.LLMEnums import DocumentTypeEnum
 
@@ -834,6 +839,30 @@ class NLPController(BaseController):
 
         return any(len(values) > 1 for values in typed_values.values())
 
+    def _compact_clarification_option(self, text: str, max_len: int = 90) -> str:
+        value = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not value:
+            return ""
+        parts = re.split(r"[\.!\?؟؛\n]+", value)
+        for part in parts:
+            cleaned = part.strip()
+            if cleaned:
+                value = cleaned
+                break
+        if len(value) > max_len:
+            value = value[: max_len - 1].rstrip() + "…"
+        return value
+
+    def _derive_clarification_option(self, answer_text: str) -> str:
+        value = str(answer_text or "").strip()
+        if not value:
+            return ""
+        signatures = self._extract_conflict_signatures(value)
+        for sig_type, sig_value in signatures:
+            if sig_type in {"date", "year", "number", "name"} and sig_value:
+                return self._compact_clarification_option(sig_value, max_len=60)
+        return self._compact_clarification_option(value)
+
     def _apply_ambiguity_gate(
         self,
         analysis: Dict[str, Any],
@@ -909,10 +938,16 @@ class NLPController(BaseController):
             options = analysis.get("clarification_options")
             if not isinstance(options, list):
                 options = []
-            cleaned_options = [str(opt).strip() for opt in options if str(opt).strip()]
+            cleaned_options = [
+                self._compact_clarification_option(str(opt))
+                for opt in options
+                if self._compact_clarification_option(str(opt))
+            ]
             if not cleaned_options:
                 for item in conflict_pool:
-                    value = str(item.get("answer") or "").strip()
+                    value = self._derive_clarification_option(
+                        str(item.get("answer") or "").strip()
+                    )
                     if value and value not in cleaned_options:
                         cleaned_options.append(value)
                     if len(cleaned_options) >= 4:
@@ -1761,169 +1796,28 @@ class NLPController(BaseController):
         history_weight: Optional[float] = None,
         ambiguity_threshold: Optional[float] = None,
         force_clarification: Optional[bool] = None,
+        project_asset_scope: Optional[Dict[int, List[int]]] = None,
     ):
-        """
-        Multihop RAG: iterative retrieval + hop summaries feeding the next hop.
-        Reranker is intentionally bypassed by default to keep hops fast.
-        """
-        max_hops = max(1, min(max_hops or 2, 5))
-        per_hop_k = max(1, min(per_hop_k or 6, 20))
-        per_hop_evidence = max(1, min(per_hop_evidence or 3, per_hop_k))
-        hop_history_weight = self._clamp_unit(
-            history_weight,
-            getattr(self.app_settings, "RAG_HISTORY_WEIGHT", 0.75),
-        )
-        inferred_style = self._infer_answer_style(query, answer_style)
-
-        template_language = getattr(self.template_parser, "language", "en")
-        style_instructions, style_hint = self._build_style_directives(
-            answer_style=inferred_style,
-            explain_retrieval=False,
-            language=template_language,
-        )
-        system_prompt = self.template_parser.get(
-            "multihop",
-            "system_prompt",
-            {"style_instructions": style_instructions},
-        )
-
-        hop_notes: List[str] = []
-        aggregated_evidence: List[Any] = []
-        context_text = (conversation_context or self.build_conversation_context(chat_messages)).strip()
-
-        for hop_idx in range(max_hops):
-            query_only_parts: List[str] = []
-            if query:
-                query_only_parts.append(query)
-            if hop_notes:
-                query_only_parts.append(" ".join(hop_notes[-2:]))
-            query_only_text = "\n".join([part for part in query_only_parts if part]).strip()
-            if not query_only_text:
-                break
-            history_aware_text = query_only_text
-            if context_text:
-                history_aware_text = f"{context_text}\n\n{query_only_text}".strip()
-
-            query_only_results = await self.search_vector_db_collection(
-                project=project,
-                text=query_only_text,
-                limit=per_hop_k,
-                doc_types=doc_types,
-                asset_ids=asset_ids,
-            )
-            history_aware_results = []
-            if history_aware_text == query_only_text:
-                history_aware_results = list(query_only_results or [])
-            else:
-                history_aware_results = await self.search_vector_db_collection(
-                    project=project,
-                    text=history_aware_text,
-                    limit=per_hop_k,
-                    doc_types=doc_types,
-                    asset_ids=asset_ids,
-                )
-
-            retrieved = self.fuse_query_and_history_results(
-                query_only_docs=query_only_results or [],
-                history_aware_docs=history_aware_results or [],
-                limit=per_hop_k,
-                history_weight=hop_history_weight,
-            )
-
-            logger.info(
-                "MULTIHOP_RETRIEVAL_FUSION hop=%d query_only=%d history_aware=%d fused=%d history_weight=%.3f",
-                hop_idx + 1,
-                len(query_only_results or []),
-                len(history_aware_results or []),
-                len(retrieved or []),
-                hop_history_weight,
-            )
-
-            if not retrieved:
-                break
-
-            top_evidence = list(retrieved[:per_hop_evidence])
-            aggregated_evidence.extend(top_evidence)
-
-            # Build a short hop summary using the LLM to keep next hop focused.
-            snippets: List[str] = []
-            for doc in top_evidence:
-                txt = (getattr(doc, "text", "") or "").strip()
-                if txt:
-                    snippets.append(txt[:700])
-            evidence_text = "\n\n".join(snippets)
-
-            hop_summary_prompt = self.template_parser.get(
-                "multihop",
-                "hop_summary_prompt",
-                {
-                    "hop_index": hop_idx + 1,
-                    "query": query,
-                    "evidence_text": evidence_text,
-                },
-            )
-
-            hop_history = [
-                self.generation_client.construct_prompt(
-                    prompt=system_prompt,
-                    role=self.generation_client.enums.SYSTEM.value,
-                )
-            ]
-
-            hop_summary = self.generation_client.generate_text(
-                prompt=hop_summary_prompt,
-                chat_history=hop_history,
-                temperature=generation_temperature if generation_temperature is not None else 0.0,
-            )
-
-            hop_summary = (hop_summary or "").strip()
-            if hop_summary:
-                hop_notes.append(hop_summary)
-            else:
-                # If summarization failed, still proceed to next hop with existing notes.
-                hop_notes.append("")
-
-            # Simple early stop: if the summary contains an explicit answer cue.
-            if any(trigger in hop_summary.lower() for trigger in ["answer:", "الجواب", "الإجابة"]):
-                break
-
-        # Aggregate final evidence: top collected chunks plus hop notes as pseudo-documents.
-        pseudo_docs: List[Any] = []
-        for idx, note in enumerate(hop_notes):
-            if not note:
-                continue
-            pseudo_docs.append(
-                SimpleNamespace(
-                    text=note,
-                    metadata={"doc_label": f"Hop {idx + 1} summary"},
-                )
-            )
-
-        final_docs = list(aggregated_evidence) + pseudo_docs
-
-        # Fallback: if nothing collected, return None
-        if not final_docs:
-            return None, None, None, [], self._default_answer_metadata()
-
-        # Reuse RAG answering with accumulated evidence.
-        answer_result, full_prompt, chat_history, answer_metadata = await self.generate_rag_answer_from_documents(
-            retrieved_documents=final_docs,
+        return await orchestrate_generate_multihop_rag_answer(
+            self,
+            project=project,
             query=query,
             chat_messages=chat_messages,
             stream=stream,
             collector=collector,
-            asset_labels=None,
-            asset_labels_by_name=None,
-            direct_hint=None,
-            answer_style=inferred_style,
-            explain_retrieval=False,
-            template_group="multihop",
+            doc_types=doc_types,
+            asset_ids=asset_ids,
+            max_hops=max_hops,
+            per_hop_k=per_hop_k,
+            per_hop_evidence=per_hop_evidence,
+            generation_temperature=generation_temperature,
+            answer_style=answer_style,
             conversation_context=conversation_context,
+            history_weight=history_weight,
             ambiguity_threshold=ambiguity_threshold,
             force_clarification=force_clarification,
+            project_asset_scope=project_asset_scope,
         )
-
-        return answer_result, full_prompt, chat_history, final_docs, answer_metadata
 
     async def generate_rag_answer_from_documents(self,
                             retrieved_documents: List[Any],
@@ -1939,185 +1833,23 @@ class NLPController(BaseController):
                             conversation_context: Optional[str] = None,
                             ambiguity_threshold: Optional[float] = None,
                             force_clarification: Optional[bool] = None):
-
-        answer_or_stream, full_prompt, chat_history = None, None, None
-        answer_metadata = self._default_answer_metadata()
-
-        if not retrieved_documents or len(retrieved_documents) == 0:
-            return answer_or_stream, full_prompt, chat_history, answer_metadata
-
-        # step2: Select evidence documents and construct LLM prompt.
-        # Use all retrieved documents (subject to the upstream `limit`)
-        # so that the model can see the full evidence set.
-        template_language = getattr(self.template_parser, "language", "en")
-        context_text = conversation_context or self.build_conversation_context(chat_messages)
-        style_instructions, style_hint = self._build_style_directives(
-            answer_style=answer_style,
-            explain_retrieval=explain_retrieval,
-            language=template_language,
-        )
-
-        system_prompt = self.template_parser.get(
-            template_group,
-            "system_prompt",
-            {"style_instructions": style_instructions},
-        )
-
-        evidence_documents: List[Any] = list(retrieved_documents)
-
-        analysis = await self.analyze_evidence_for_answer(
+        return await orchestrate_generate_rag_answer_from_documents(
+            self,
+            retrieved_documents=retrieved_documents,
             query=query,
-            retrieved_documents=evidence_documents,
             chat_messages=chat_messages,
-            conversation_context=context_text,
-            template_group=template_group,
-            ambiguity_threshold=ambiguity_threshold,
+            stream=stream,
+            collector=collector,
             asset_labels=asset_labels,
             asset_labels_by_name=asset_labels_by_name,
+            direct_hint=direct_hint,
+            answer_style=answer_style,
+            explain_retrieval=explain_retrieval,
+            template_group=template_group,
+            conversation_context=conversation_context,
+            ambiguity_threshold=ambiguity_threshold,
+            force_clarification=force_clarification,
         )
-
-        ambiguity_enabled = bool(getattr(self.app_settings, "RAG_AMBIGUITY_ENABLED", True))
-        force_clarify = (
-            bool(getattr(self.app_settings, "RAG_FORCE_CLARIFICATION", True))
-            if force_clarification is None
-            else bool(force_clarification)
-        )
-        needs_clarification = bool(analysis.get("ambiguity_detected", False) and ambiguity_enabled)
-
-        answer_metadata.update(
-            {
-                "needs_clarification": bool(needs_clarification and force_clarify),
-                "clarification_question": analysis.get("clarification_question") or None,
-                "clarification_options": analysis.get("clarification_options") or None,
-                "answer_confidence": analysis.get("answer_confidence"),
-                "ambiguity_reason": analysis.get("ambiguity_reason") or None,
-                "evidence_summary": analysis.get("evidence_summary") or None,
-                "_analysis_parse_failed": bool(analysis.get("__analysis_parse_failed", False)),
-                "_analysis_source": analysis.get("__analysis_source"),
-            }
-        )
-
-        logger.info(
-            "RAG_AMBIGUITY_EVENT mode=%s ambiguity_detected=%s needs_clarification=%s force_clarification=%s reason=%s candidates=%d parse_failed=%s",
-            template_group,
-            bool(analysis.get("ambiguity_detected", False) and ambiguity_enabled),
-            bool(needs_clarification and force_clarify),
-            bool(force_clarify),
-            str(analysis.get("ambiguity_reason") or "").strip(),
-            len(analysis.get("candidate_answers") or []),
-            bool(analysis.get("__analysis_parse_failed", False)),
-        )
-
-        if needs_clarification and force_clarify:
-            clarification_question = (
-                str(analysis.get("clarification_question") or "").strip()
-                or ("Could you clarify which exact option you mean?")
-            )
-            options = analysis.get("clarification_options") or []
-            option_lines = [
-                f"- {str(option).strip()}"
-                for option in options
-                if str(option).strip()
-            ]
-            if option_lines:
-                clarification_text = "\n".join([clarification_question, *option_lines])
-            else:
-                clarification_text = clarification_question
-            return clarification_text, None, None, answer_metadata
-
-        document_sections = []
-        for idx, doc in enumerate(evidence_documents):
-            chunk_text = self.generation_client.process_text(doc.text)
-            doc_label = self._resolve_document_label(
-                getattr(doc, "metadata", None),
-                fallback_label=f"Document {idx + 1}",
-                asset_labels=asset_labels,
-                asset_labels_by_name=asset_labels_by_name,
-            )
-            section = self.template_parser.get(template_group, "document_prompt", {
-                    "doc_label": doc_label,
-                    "chunk_text": chunk_text,
-            }) or f"## Document: {doc_label}\n### Content: {chunk_text}"
-            document_sections.append(section)
-
-        documents_prompts = "\n".join(document_sections)
-
-        hint_section = ""
-        if direct_hint:
-            hint_section = self.template_parser.get(template_group, "hint_section", {
-                "hint": direct_hint,
-            }) or ("\n\n# Direct candidate answer extracted from documents:\n"
-                   f"{direct_hint}\n")
-            documents_prompts = documents_prompts + "\n" + hint_section
-
-        footer_prompt = self.template_parser.get(template_group, "footer_prompt", {
-            "query": query,
-            "style_hint": style_hint,
-            "conversation_context": context_text or "",
-            "analysis_summary": analysis.get("evidence_summary") or "",
-        })
-
-        # step3: Construct Generation Client Prompts
-        chat_history = [
-            self.generation_client.construct_prompt(
-                prompt=system_prompt,
-                role=self.generation_client.enums.SYSTEM.value,
-            )
-        ]
-
-        if chat_messages:
-            trimmed_messages = chat_messages[-5:]
-
-            if len(trimmed_messages) > 2:
-                earlier_messages = trimmed_messages[:-2]
-                prioritized_messages = trimmed_messages[-2:]
-            else:
-                earlier_messages = []
-                prioritized_messages = trimmed_messages
-
-            for message in earlier_messages:
-                chat_history.append(
-                    self.generation_client.construct_prompt(
-                        prompt=self.generation_client.process_text(message.get("prompt", "")),
-                        role=self.generation_client.enums.USER.value,
-                    )
-                )
-                chat_history.append(
-                    self.generation_client.construct_prompt(
-                        prompt=self.generation_client.process_text(message.get("answer", "")),
-                        role=self.generation_client.enums.ASSISTANT.value,
-                    )
-                )
-
-            for message in prioritized_messages:
-                chat_history.append(
-                    self.generation_client.construct_prompt(
-                        prompt=self.generation_client.process_text(message.get("prompt", "")),
-                        role=self.generation_client.enums.USER.value,
-                    )
-                )
-                chat_history.append(
-                    self.generation_client.construct_prompt(
-                        prompt=self.generation_client.process_text(message.get("answer", "")),
-                        role=self.generation_client.enums.ASSISTANT.value,
-                    )
-                )
-
-        full_prompt = "\n\n".join([ documents_prompts,  footer_prompt])
-
-        if stream:
-            answer_or_stream = self.generation_client.generate_text_stream(
-                prompt=full_prompt,
-                chat_history=chat_history,
-                collector=collector
-            )
-        else:
-            answer_or_stream = self.generation_client.generate_text(
-                prompt=full_prompt,
-                chat_history=chat_history
-            )
-
-        return answer_or_stream, full_prompt, chat_history, answer_metadata
 
     async def generate_regular_chat_response(
         self,
@@ -2128,72 +1860,15 @@ class NLPController(BaseController):
         answer_style: Optional[str] = None,
         explain_retrieval: bool = False,  # unused here but kept for API symmetry
     ):
-        """
-        Generate a general (non-RAG) chat response that still respects the
-        locale-specific system instructions but does not include any document
-        evidence. This path is used for the Regular Chat Mode.
-        """
-        system_prompt = self.template_parser.get("chat", "system_prompt") or (
-            "You are a concise, policy-compliant assistant. "
-            "Answer helpfully, stay polite, and decline any unsafe requests."
-        )
-        template_language = getattr(self.template_parser, "language", "en")
-        _, style_hint = self._build_style_directives(
+        return await orchestrate_generate_regular_chat_response(
+            self,
+            query=query,
+            chat_messages=chat_messages,
+            stream=stream,
+            collector=collector,
             answer_style=answer_style,
-            explain_retrieval=False,
-            language=template_language,
+            explain_retrieval=explain_retrieval,
         )
-
-        chat_history = [
-            self.generation_client.construct_prompt(
-                prompt=system_prompt,
-                role=self.generation_client.enums.SYSTEM.value,
-            )
-        ]
-
-        if chat_messages:
-            trimmed_messages = chat_messages[-8:]
-            for message in trimmed_messages:
-                prompt_text = self.generation_client.process_text(message.get("prompt", ""))
-                answer_text = self.generation_client.process_text(message.get("answer", ""))
-                if prompt_text:
-                    chat_history.append(
-                        self.generation_client.construct_prompt(
-                            prompt=prompt_text,
-                            role=self.generation_client.enums.USER.value,
-                        )
-                    )
-                if answer_text:
-                    chat_history.append(
-                        self.generation_client.construct_prompt(
-                            prompt=answer_text,
-                            role=self.generation_client.enums.ASSISTANT.value,
-                    )
-                )
-
-        style_prefix = ""
-        style_norm = self._normalize_answer_style(answer_style)
-        if style_norm == "detailed":
-            style_prefix = "Provide a detailed, well-structured answer. "
-        elif style_norm == "balanced":
-            style_prefix = "Provide a concise answer, then add key details. "
-        else:
-            style_prefix = "Keep the answer concise and direct. "
-
-        final_prompt = self.generation_client.process_text(f"{style_prefix}{query or ''}".strip())
-        if stream:
-            answer_stream = self.generation_client.generate_text_stream(
-                prompt=final_prompt,
-                chat_history=chat_history,
-                collector=collector,
-            )
-            return answer_stream, final_prompt, chat_history
-
-        answer = self.generation_client.generate_text(
-            prompt=final_prompt,
-            chat_history=chat_history,
-        )
-        return answer, final_prompt, chat_history
     
     def summarize_chunks(self, chunks: List[DataChunk], focus: Optional[str] = None,
                          max_output_tokens: Optional[int] = None,
@@ -2201,64 +1876,13 @@ class NLPController(BaseController):
                          asset_labels_by_name: Optional[Dict[str, str]] = None,
                          stream: bool = False,
                          collector: Optional[Dict[str, list]] = None):
-        if not chunks or len(chunks) == 0:
-            return None, None
-
-        system_prompt = self.template_parser.get("summary", "system_prompt") or (
-            "You are an assistant that condenses provided content into a clear, concise summary."
+        return orchestrate_summarize_chunks(
+            self,
+            chunks=chunks,
+            focus=focus,
+            max_output_tokens=max_output_tokens,
+            asset_labels=asset_labels,
+            asset_labels_by_name=asset_labels_by_name,
+            stream=stream,
+            collector=collector,
         )
-
-        document_sections = []
-        for idx, chunk in enumerate(chunks):
-            chunk_text = self.generation_client.process_text(chunk.chunk_text)
-            fallback_label = f"Document {chunk.chunk_order if chunk.chunk_order else idx + 1}"
-            doc_label = self._resolve_document_label(
-                getattr(chunk, "chunk_metadata", None),
-                fallback_label=fallback_label,
-                asset_labels=asset_labels,
-                asset_labels_by_name=asset_labels_by_name,
-                asset_id_hint=getattr(chunk, "chunk_asset_id", None),
-            )
-            section = self.template_parser.get("summary", "document_prompt", {
-                "doc_label": doc_label,
-                "chunk_text": chunk_text,
-            }) or f"## Document: {doc_label}\n{chunk_text}"
-            document_sections.append(section)
-
-        documents_prompts = "\n".join(document_sections)
-
-        default_focus = self.template_parser.get("summary", "default_focus") or "Provide a concise summary that highlights the key ideas and critical details."
-
-        summary_prompt = self.template_parser.get("summary", "summary_prompt", {
-            "documents": documents_prompts,
-            "focus": focus or default_focus,
-        }) or "\n".join([
-            "Summarize the following documents.",
-            documents_prompts,
-            "",
-            focus or default_focus
-        ])
-
-        chat_history = [
-            self.generation_client.construct_prompt(
-                prompt=system_prompt,
-                role=self.generation_client.enums.SYSTEM.value,
-            )
-        ]
-
-        if stream:
-            summary_stream = self.generation_client.generate_text_stream(
-                prompt=summary_prompt,
-                chat_history=chat_history,
-                max_output_tokens=max_output_tokens,
-                collector=collector,
-            )
-            return summary_stream, summary_prompt
-
-        summary = self.generation_client.generate_text(
-            prompt=summary_prompt,
-            chat_history=chat_history,
-            max_output_tokens=max_output_tokens
-        )
-
-        return summary, summary_prompt

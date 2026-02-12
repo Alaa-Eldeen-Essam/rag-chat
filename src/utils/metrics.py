@@ -6,6 +6,25 @@ import time
 # Define metrics
 REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
 REQUEST_LATENCY = Histogram('http_request_duration_seconds', 'HTTP Request Latency', ['method', 'endpoint'])
+PROMPT_GUARD_BYPASS_TOTAL = Counter(
+    "prompt_guard_bypass_total",
+    "Prompt guard bypass header attempts by allow decision",
+    ["allowed"],
+)
+RAG_FALLBACK_TOTAL = Counter(
+    "rag_fallback_total",
+    "RAG fallback answers emitted",
+    ["mode"],
+)
+RAG_CLARIFICATION_TOTAL = Counter(
+    "rag_clarification_total",
+    "RAG clarification responses emitted",
+    ["mode"],
+)
+MULTIHOP_SCOPE_PROJECTS = Histogram(
+    "multihop_scope_projects",
+    "Number of projects included in multihop retrieval scope",
+)
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):

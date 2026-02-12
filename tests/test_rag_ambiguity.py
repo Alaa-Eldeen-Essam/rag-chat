@@ -177,6 +177,34 @@ class RagAmbiguityTests(unittest.TestCase):
         self.assertTrue(bool(result.get("__analysis_parse_failed", False)))
         self.assertTrue(isinstance(result.get("evidence_summary"), str))
 
+    def test_clarification_options_are_compact(self):
+        controller = _build_controller()
+        analysis = {
+            "candidate_answers": [
+                {
+                    "answer": "The event likely happened according to source A after a long explanation that should be shortened significantly for UI clarity and practical option rendering.",
+                    "support_count": 2,
+                    "confidence": 0.55,
+                },
+                {
+                    "answer": "Another long candidate from source B with details that should not be shown as a full paragraph in the clarification options presented to the end user.",
+                    "support_count": 2,
+                    "confidence": 0.54,
+                },
+            ],
+            "ambiguity_detected": False,
+        }
+        result = controller._apply_ambiguity_gate(
+            analysis=analysis,
+            query="Which one is correct?",
+            ambiguity_threshold=0.12,
+            top_n=4,
+        )
+        options = result.get("clarification_options") or []
+        self.assertTrue(options)
+        for option in options:
+            self.assertLessEqual(len(str(option)), 90)
+
 
 if __name__ == "__main__":
     unittest.main()

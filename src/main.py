@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from helpers.security import hash_password
 from utils.metrics import setup_metrics
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
 
 setup_metrics(app)
 

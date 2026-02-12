@@ -105,7 +105,7 @@ class _TrackingController(NLPController):
             embedding_client=object(),
             template_parser=_DummyTemplateParser(),
         )
-        self.search_calls: list[str] = []
+        self.search_calls: list[tuple[int, str]] = []
         self.captured_docs: list = []
 
     async def search_vector_db_collection(
@@ -117,13 +117,30 @@ class _TrackingController(NLPController):
         asset_ids=None,
         keywords=None,
     ):
-        self.search_calls.append(text)
+        project_id = int(getattr(project, "project_id", 0) or 0)
+        self.search_calls.append((project_id, text))
         if "CTX_MARKER" in (text or ""):
             return [
-                SimpleNamespace(text="history evidence", score=1.0, metadata={"chunk_id": 200}),
+                SimpleNamespace(
+                    text=f"history evidence p{project_id}",
+                    score=1.0,
+                    metadata={
+                        "chunk_id": 2000 + project_id,
+                        "project_id": project_id,
+                        "asset_id": project_id,
+                    },
+                ),
             ]
         return [
-            SimpleNamespace(text="query evidence", score=1.0, metadata={"chunk_id": 100}),
+            SimpleNamespace(
+                text=f"query evidence p{project_id}",
+                score=1.0,
+                metadata={
+                    "chunk_id": 1000 + project_id,
+                    "project_id": project_id,
+                    "asset_id": project_id,
+                },
+            ),
         ]
 
     async def generate_rag_answer_from_documents(
@@ -170,7 +187,7 @@ class MultiHopHistoryWeightingTests(unittest.TestCase):
         self.assertGreaterEqual(len(controller.search_calls), 2)
         self.assertTrue(controller.captured_docs)
         top_chunk_id = int((controller.captured_docs[0].metadata or {}).get("chunk_id"))
-        self.assertEqual(top_chunk_id, 200)
+        self.assertEqual(top_chunk_id, 2001)
 
     def test_multihop_prefers_query_results_when_history_weight_zero(self):
         controller = _TrackingController()
@@ -188,7 +205,33 @@ class MultiHopHistoryWeightingTests(unittest.TestCase):
         )
         self.assertTrue(controller.captured_docs)
         top_chunk_id = int((controller.captured_docs[0].metadata or {}).get("chunk_id"))
-        self.assertEqual(top_chunk_id, 100)
+        self.assertEqual(top_chunk_id, 1001)
+
+    def test_multihop_project_scope_retrieves_across_projects(self):
+        controller = _TrackingController()
+        project = SimpleNamespace(project_id=999)
+        asyncio.run(
+            controller.generate_multihop_rag_answer(
+                project=project,
+                query="what happened?",
+                max_hops=1,
+                per_hop_k=3,
+                per_hop_evidence=2,
+                conversation_context="CTX_MARKER",
+                history_weight=0.0,
+                project_asset_scope={1: [10], 2: [20]},
+            )
+        )
+        searched_project_ids = {pid for pid, _ in controller.search_calls}
+        self.assertIn(1, searched_project_ids)
+        self.assertIn(2, searched_project_ids)
+        chunk_ids = {
+            int((doc.metadata or {}).get("chunk_id"))
+            for doc in controller.captured_docs
+            if getattr(doc, "metadata", None)
+            and (doc.metadata or {}).get("chunk_id") is not None
+        }
+        self.assertTrue(any(chunk_id in chunk_ids for chunk_id in (1001, 1002)))
 
 
 if __name__ == "__main__":

@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     RERANKER_TIMEOUT: float = 30.0
     OLLAMA_RERANKER_MODEL_ID: Optional[str] = None
     OLLAMA_RERANKER_HOST: Optional[str] = None
+    RERANKER_FALLBACK_MODEL_ID: Optional[str] = None
 
     # Retrieval weighting
     RETRIEVAL_DENSE_WEIGHT: float = 0.6
@@ -109,6 +110,11 @@ class Settings(BaseSettings):
     RAG_FORCE_CLARIFICATION: bool = True
     RAG_EVIDENCE_SYNTHESIS_ENABLED: bool = True
     RAG_EVIDENCE_SYNTHESIS_MAX_DOCS: int = 8
+    RAG_MIN_ANSWER_CONFIDENCE: float = 0.20
+    RAG_GROUNDING_ENABLED: bool = True
+    RAG_GROUNDING_MIN_CLAIM_OVERLAP: float = 0.20
+    RAG_GROUNDING_MAX_UNGROUNDED_CLAIMS: int = 1
+    RAG_GROUNDING_MIN_TOKEN_MATCHES: int = 2
 
     # Multihop RAG defaults
     MULTIHOP_MAX_HOPS: int = 2
@@ -122,6 +128,9 @@ class Settings(BaseSettings):
     PROMPT_GUARD_PYTECTOR_MODEL: Optional[str] = None
     PROMPT_GUARD_PYTECTOR_THRESHOLD: float = 0.75
     PROMPT_GUARD_BYPASS_HEADER: str = "X-Bypass-Prompt-Guard"
+
+    # Debug payload controls
+    DEBUG_INCLUDE_PROMPTS: bool = False
 
 def get_settings() -> Settings:
     return Settings()

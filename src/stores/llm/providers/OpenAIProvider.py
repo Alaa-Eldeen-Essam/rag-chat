@@ -44,7 +44,7 @@ class OpenAIProvider(LLMInterface):
     def process_text(self, text: str):
         return text[:self.default_input_max_characters].strip()
 
-    def generate_text(self, prompt: str, chat_history: list=[], max_output_tokens: int=None,
+    def generate_text(self, prompt: str, chat_history: list=None, max_output_tokens: int=None,
                             temperature: float = None):
         
         if not self.client:
@@ -60,13 +60,14 @@ class OpenAIProvider(LLMInterface):
         # temperature 0 and top_p 1 unless explicitly overridden.
         temperature = self.default_generation_temperature if temperature is None else temperature
 
-        chat_history.append(
+        history = list(chat_history) if chat_history else []
+        history.append(
             self.construct_prompt(prompt=prompt, role=OpenAIEnums.USER.value)
         )
 
         response = self.client.chat.completions.create(
             model=self.generation_model_id,
-            messages=chat_history,
+            messages=history,
             max_tokens=max_output_tokens,
             temperature=temperature,
             top_p=1.0,
@@ -80,8 +81,6 @@ class OpenAIProvider(LLMInterface):
         content = getattr(message, "content", None)
 
         answer_parts = []
-        reasoning_parts = []
-
         if isinstance(content, list):
             for part in content:
                 part_type = getattr(part, "type", None)
@@ -96,10 +95,9 @@ class OpenAIProvider(LLMInterface):
                         part_content = part.get("content")
 
                 if part_text:
-                    target = answer_parts
                     if part_type and isinstance(part_type, str) and part_type.lower() in ("reasoning", "analysis", "thought"):
-                        target = reasoning_parts
-                    target.append(part_text.strip())
+                        continue
+                    answer_parts.append(part_text.strip())
                 elif isinstance(part_content, str):
                     answer_parts.append(part_content.strip())
                 elif isinstance(part_content, list):
@@ -109,12 +107,6 @@ class OpenAIProvider(LLMInterface):
 
         elif isinstance(content, str) and content.strip():
             answer_parts.append(content.strip())
-
-        reasoning_text = getattr(message, "reasoning", None)
-        if reasoning_text and isinstance(reasoning_text, str):
-            reasoning_text = reasoning_text.strip()
-            if reasoning_text:
-                reasoning_parts.append(reasoning_text)
 
         output_text = getattr(message, "output_text", None)
         if output_text:
@@ -137,9 +129,6 @@ class OpenAIProvider(LLMInterface):
 
         if answer_parts:
             combined_sections.append("\n".join(answer_parts).strip())
-
-        if reasoning_parts:
-            combined_sections.append("Reasoning:\n" + "\n".join(reasoning_parts).strip())
 
         if not combined_sections:
             refusal = getattr(message, "refusal", None)
@@ -189,7 +178,7 @@ class OpenAIProvider(LLMInterface):
 
         return texts
 
-    def generate_text_stream(self, prompt: str, chat_history: list=[], max_output_tokens: int=None,
+    def generate_text_stream(self, prompt: str, chat_history: list=None, max_output_tokens: int=None,
                              temperature: float = None, collector: dict=None):
 
         if not self.client:
