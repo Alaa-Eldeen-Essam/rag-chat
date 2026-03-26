@@ -1,192 +1,283 @@
-from fastapi import FastAPI, APIRouter, status, Request
-from fastapi.responses import JSONResponse
-from routes.schemes.nlp import PushRequest, SearchRequest
-from models.ProjectModel import ProjectModel
-from models.ChunkModel import ChunkModel
-from controllers import NLPController
-from models import ResponseSignal
+from fastapi import APIRouter, Depends, Query, Request
+from langdetect import DetectorFactory, LangDetectException, detect
+from typing import List, Optional
+import re
 
-import logging
+from helpers.config import Settings, get_settings
+from models.ChatHistoryModel import MAX_CONVERSATION_MESSAGES
+from models.db_schemes import User
+from routes.dependencies import get_current_user
+from routes.nlp_answer_orchestrator import handle_answer_rag
+from routes.nlp_conversation_orchestrator import (
+    handle_delete_conversation,
+    handle_get_conversation_history,
+    handle_list_conversations,
+    handle_list_user_doc_types,
+    handle_rename_conversation,
+)
+from routes.nlp_index_orchestrator import (
+    handle_get_project_index_info,
+    handle_index_project,
+    handle_search_index,
+)
+from routes.nlp_summary_orchestrator import (
+    handle_delete_summaries_bulk,
+    handle_delete_summary,
+    handle_get_summary,
+    handle_list_summaries,
+    handle_summarize_project,
+)
+from routes.schemes.nlp import (
+    ConversationUpdateRequest,
+    DeleteSummariesRequest,
+    PushRequest,
+    SearchRequest,
+    SummarizeRequest,
+)
 
-logger = logging.getLogger('uvicorn.error')
+DetectorFactory.seed = 0
+
 
 nlp_router = APIRouter(
     prefix="/api/v1/nlp",
     tags=["api_v1", "nlp"],
 )
 
+KNOWN_DOCUMENT_TYPES = {"general", "military", "law", "finance"}
+FILTERABLE_DOCUMENT_TYPES = KNOWN_DOCUMENT_TYPES - {"general"}
+
+
+def detect_language_or_default(text: str, default: str) -> str:
+    if not text:
+        return default
+
+    if re.search(r"[\u0600-\u06FF]", text):
+        return "ar"
+
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+
+    try:
+        lang = detect(text)
+    except LangDetectException:
+        return default
+
+    if lang.startswith("ar"):
+        return "ar"
+    return "en"
+
+
+def extract_document_types_from_query(query: str) -> List[str]:
+    if not query:
+        return []
+
+    lowered = query.lower()
+    matches = set()
+
+    for doc_type in FILTERABLE_DOCUMENT_TYPES:
+        trigger_phrases = [
+            f"{doc_type} doc",
+            f"{doc_type} docs",
+            f"{doc_type} document",
+            f"{doc_type} documents",
+            f"from {doc_type}",
+            f"in {doc_type} doc",
+            f"in {doc_type} documents",
+        ]
+
+        if any(phrase in lowered for phrase in trigger_phrases):
+            matches.add(doc_type)
+
+    return list(matches)
+
+
 @nlp_router.post("/index/push/{project_id}")
-async def index_project(request: Request, project_id: str, push_request: PushRequest):
-
-    project_model = await ProjectModel.create_instance(
-        db_client=request.app.db_client
+async def index_project(
+    request: Request,
+    project_id: int,
+    push_request: PushRequest,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_index_project(
+        request=request,
+        project_id=project_id,
+        push_request=push_request,
+        current_user=current_user,
     )
 
-    chunk_model = await ChunkModel.create_instance(
-        db_client=request.app.db_client
-    )
-
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
-    )
-
-    if not project:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "signal": ResponseSignal.PROJECT_NOT_FOUND_ERROR.value
-            }
-        )
-    
-    nlp_controller = NLPController(
-        vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
-        embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
-    )
-
-    has_records = True
-    page_no = 1
-    inserted_items_count = 0
-    idx = 0
-
-    while has_records:
-        page_chunks = await chunk_model.get_poject_chunks(project_id=project.id, page_no=page_no)
-        if len(page_chunks):
-            page_no += 1
-        
-        if not page_chunks or len(page_chunks) == 0:
-            has_records = False
-            break
-
-        chunks_ids =  list(range(idx, idx + len(page_chunks)))
-        idx += len(page_chunks)
-        
-        is_inserted = nlp_controller.index_into_vector_db(
-            project=project,
-            chunks=page_chunks,
-            do_reset=push_request.do_reset,
-            chunks_ids=chunks_ids
-        )
-
-        if not is_inserted:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "signal": ResponseSignal.INSERT_INTO_VECTORDB_ERROR.value
-                }
-            )
-        
-        inserted_items_count += len(page_chunks)
-        
-    return JSONResponse(
-        content={
-            "signal": ResponseSignal.INSERT_INTO_VECTORDB_SUCCESS.value,
-            "inserted_items_count": inserted_items_count
-        }
-    )
 
 @nlp_router.get("/index/info/{project_id}")
-async def get_project_index_info(request: Request, project_id: str):
-    
-    project_model = await ProjectModel.create_instance(
-        db_client=request.app.db_client
+async def get_project_index_info(
+    request: Request,
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_get_project_index_info(
+        request=request,
+        project_id=project_id,
+        current_user=current_user,
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+
+@nlp_router.get("/conversations")
+async def list_conversations(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_list_conversations(request=request, current_user=current_user)
+
+
+@nlp_router.get("/doc-types")
+async def list_user_doc_types(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_list_user_doc_types(request=request, current_user=current_user)
+
+
+@nlp_router.get("/conversations/{conversation_id}/history")
+async def get_conversation_history(
+    request: Request,
+    conversation_id: int,
+    limit: Optional[int] = Query(None, ge=1, le=MAX_CONVERSATION_MESSAGES),
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_get_conversation_history(
+        request=request,
+        conversation_id=conversation_id,
+        limit=limit,
+        current_user=current_user,
     )
 
-    nlp_controller = NLPController(
-        vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
-        embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
+
+@nlp_router.patch("/conversations/{conversation_id}")
+async def rename_conversation(
+    request: Request,
+    conversation_id: int,
+    update: ConversationUpdateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_rename_conversation(
+        request=request,
+        conversation_id=conversation_id,
+        update=update,
+        current_user=current_user,
     )
 
-    collection_info = nlp_controller.get_vector_db_collection_info(project=project)
 
-    return JSONResponse(
-        content={
-            "signal": ResponseSignal.VECTORDB_COLLECTION_RETRIEVED.value,
-            "collection_info": collection_info
-        }
+@nlp_router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    request: Request,
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_delete_conversation(
+        request=request,
+        conversation_id=conversation_id,
+        current_user=current_user,
     )
+
 
 @nlp_router.post("/index/search/{project_id}")
-async def search_index(request: Request, project_id: str, search_request: SearchRequest):
-    
-    project_model = await ProjectModel.create_instance(
-        db_client=request.app.db_client
+async def search_index(
+    request: Request,
+    project_id: int,
+    search_request: SearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_search_index(
+        request=request,
+        project_id=project_id,
+        search_request=search_request,
+        current_user=current_user,
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
-    )
-
-    nlp_controller = NLPController(
-        vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
-        embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
-    )
-
-    results = nlp_controller.search_vector_db_collection(
-        project=project, text=search_request.text, limit=search_request.limit
-    )
-
-    if not results:
-        return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "signal": ResponseSignal.VECTORDB_SEARCH_ERROR.value
-                }
-            )
-    
-    return JSONResponse(
-        content={
-            "signal": ResponseSignal.VECTORDB_SEARCH_SUCCESS.value,
-            "results": [ result.dict()  for result in results ]
-        }
-    )
 
 @nlp_router.post("/index/answer/{project_id}")
-async def answer_rag(request: Request, project_id: str, search_request: SearchRequest):
-    
-    project_model = await ProjectModel.create_instance(
-        db_client=request.app.db_client
+async def answer_rag(
+    request: Request,
+    project_id: int,
+    search_request: SearchRequest,
+    current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
+):
+    return await handle_answer_rag(
+        request=request,
+        project_id=project_id,
+        search_request=search_request,
+        current_user=current_user,
+        app_settings=app_settings,
+        language_detector=detect_language_or_default,
     )
 
-    project = await project_model.get_project_or_create_one(
-        project_id=project_id
+
+@nlp_router.post("/summary/{project_id}")
+async def summarize_project(
+    request: Request,
+    project_id: int,
+    summarize_request: SummarizeRequest,
+    current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
+):
+    return await handle_summarize_project(
+        request=request,
+        project_id=project_id,
+        summarize_request=summarize_request,
+        current_user=current_user,
+        app_settings=app_settings,
+        language_detector=detect_language_or_default,
     )
 
-    nlp_controller = NLPController(
-        vectordb_client=request.app.vectordb_client,
-        generation_client=request.app.generation_client,
-        embedding_client=request.app.embedding_client,
-        template_parser=request.app.template_parser,
+
+@nlp_router.get("/summary")
+async def list_summaries(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_list_summaries(
+        request=request,
+        limit=limit,
+        current_user=current_user,
     )
 
-    answer, full_prompt, chat_history = nlp_controller.answer_rag_question(
-        project=project,
-        query=search_request.text,
-        limit=search_request.limit,
+
+@nlp_router.get("/summary/{summary_id}")
+async def get_summary(
+    request: Request,
+    summary_id: int,
+    current_user: User = Depends(get_current_user),
+    app_settings: Settings = Depends(get_settings),
+):
+    return await handle_get_summary(
+        request=request,
+        summary_id=summary_id,
+        current_user=current_user,
+        app_settings=app_settings,
     )
 
-    if not answer:
-        return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "signal": ResponseSignal.RAG_ANSWER_ERROR.value
-                }
-        )
-    
-    return JSONResponse(
-        content={
-            "signal": ResponseSignal.RAG_ANSWER_SUCCESS.value,
-            "answer": answer,
-            "full_prompt": full_prompt,
-            "chat_history": chat_history
-        }
+
+@nlp_router.delete("/summary/{summary_id}")
+async def delete_summary(
+    request: Request,
+    summary_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_delete_summary(
+        request=request,
+        summary_id=summary_id,
+        current_user=current_user,
+    )
+
+
+@nlp_router.post("/summaries/bulk-delete")
+async def delete_summaries_bulk(
+    request: Request,
+    payload: DeleteSummariesRequest,
+    current_user: User = Depends(get_current_user),
+):
+    return await handle_delete_summaries_bulk(
+        request=request,
+        payload=payload,
+        current_user=current_user,
     )

@@ -1,62 +1,174 @@
 from .BaseDataModel import BaseDataModel
 from .db_schemes import Asset
-from .enums.DataBaseEnum import DataBaseEnum
-from bson import ObjectId
+from sqlalchemy.future import select
+from sqlalchemy import or_
 
 class AssetModel(BaseDataModel):
 
     def __init__(self, db_client: object):
         super().__init__(db_client=db_client)
-        self.collection = self.db_client[DataBaseEnum.COLLECTION_ASSET_NAME.value]
+        self.db_client = db_client
 
     @classmethod
     async def create_instance(cls, db_client: object):
         instance = cls(db_client)
-        await instance.init_collection()
         return instance
-
-    async def init_collection(self):
-        all_collections = await self.db_client.list_collection_names()
-        if DataBaseEnum.COLLECTION_ASSET_NAME.value not in all_collections:
-            self.collection = self.db_client[DataBaseEnum.COLLECTION_ASSET_NAME.value]
-            indexes = Asset.get_indexes()
-            for index in indexes:
-                await self.collection.create_index(
-                    index["key"],
-                    name=index["name"],
-                    unique=index["unique"]
-                )
 
     async def create_asset(self, asset: Asset):
 
-        result = await self.collection.insert_one(asset.dict(by_alias=True, exclude_unset=True))
-        asset.id = result.inserted_id
-
+        async with self.db_client() as session:
+            async with session.begin():
+                if not asset.asset_document_type or not asset.asset_document_type.strip():
+                    asset.asset_document_type = "general"
+                else:
+                    asset.asset_document_type = asset.asset_document_type.strip().lower()
+                # Normalize visibility
+                visibility = (getattr(asset, "asset_visibility", None) or "private").strip().lower()
+                if visibility not in ("private", "department", "global"):
+                    visibility = "private"
+                asset.asset_visibility = visibility
+                session.add(asset)
+            await session.commit()
+            await session.refresh(asset)
         return asset
 
-    async def get_all_project_assets(self, asset_project_id: str, asset_type: str):
+    def _can_user_access(self, asset: Asset, current_user) -> bool:
+        if current_user is None:
+            return False
 
-        records = await self.collection.find({
-            "asset_project_id": ObjectId(asset_project_id) if isinstance(asset_project_id, str) else asset_project_id,
-            "asset_type": asset_type,
-        }).to_list(length=None)
+        if getattr(current_user, "is_admin", False):
+            return True
 
-        return [
-            Asset(**record)
-            for record in records
-        ]
+        # Owner always has access
+        if asset.asset_user_id == getattr(current_user, "id", None):
+            return True
 
-    async def get_asset_record(self, asset_project_id: str, asset_name: str):
+        visibility = getattr(asset, "asset_visibility", None) or (
+            "private" if getattr(asset, "asset_is_private", True) else "global"
+        )
+        visibility = visibility.lower()
+        asset_dept = getattr(asset, "asset_department", None)
+        user_dept = getattr(current_user, "department", None)
 
-        record = await self.collection.find_one({
-            "asset_project_id": ObjectId(asset_project_id) if isinstance(asset_project_id, str) else asset_project_id,
-            "asset_name": asset_name,
-        })
+        if visibility == "global":
+            return True
+        if visibility == "department" and asset_dept and user_dept:
+            if isinstance(asset_dept, list):
+                return user_dept in asset_dept
+            elif isinstance(asset_dept, str):
+                return user_dept == asset_dept
 
-        if record:
-            return Asset(**record)
-        
-        return None
+        # default / private
+        return False
 
+    async def get_all_project_assets(self, asset_project_id: int, asset_type: str, current_user):
 
-    
+        async with self.db_client() as session:
+            stmt = select(Asset).where(
+                Asset.asset_project_id == asset_project_id,
+                Asset.asset_type == asset_type
+            )
+
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+
+        if current_user and not getattr(current_user, "is_admin", False):
+            return [a for a in records if self._can_user_access(a, current_user)]
+        return records
+
+    async def get_all_accessible_assets(self, asset_type: str, current_user):
+
+        async with self.db_client() as session:
+            stmt = select(Asset).where(Asset.asset_type == asset_type)
+
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+
+        if current_user and not getattr(current_user, "is_admin", False):
+            return [a for a in records if self._can_user_access(a, current_user)]
+        return records
+
+    async def get_asset_record(self, asset_project_id: int, asset_name: str, current_user):
+
+        async with self.db_client() as session:
+            stmt = select(Asset).where(
+                Asset.asset_project_id == asset_project_id,
+                Asset.asset_name == asset_name
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+
+            if record is None:
+                return None, False
+
+            if not self._can_user_access(asset=record, current_user=current_user):
+                return None, True
+        return record, True
+
+    async def get_asset_by_id(self, asset_id: int, current_user):
+
+        async with self.db_client() as session:
+            stmt = select(Asset).where(Asset.asset_id == asset_id)
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+
+            if record is None:
+                return None, False
+
+            if not self._can_user_access(asset=record, current_user=current_user):
+                return None, True
+        return record, True
+
+    async def delete_asset(self, asset: Asset):
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.delete(asset)
+            await session.commit()
+
+    def _normalize_departments(self, departments):
+        if not departments:
+            return []
+        normalized = []
+        seen = set()
+        for entry in departments:
+            if not entry:
+                continue
+            value = str(entry).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        return normalized
+
+    async def set_asset_departments(self, asset_id: int, departments):
+        normalized = self._normalize_departments(departments)
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    Asset.__table__.update()
+                    .where(Asset.asset_id == asset_id)
+                    .values(asset_department=normalized or None)
+                )
+            await session.commit()
+        return normalized
+
+    async def update_visibility(self, asset_id: int, visibility: str):
+        vis = (visibility or "private").strip().lower()
+        if vis not in ("private", "department", "global"):
+            vis = "private"
+        is_private = vis == "private"
+        async with self.db_client() as session:
+            async with session.begin():
+                await session.execute(
+                    Asset.__table__.update()
+                    .where(Asset.asset_id == asset_id)
+                    .values(
+                        asset_visibility=vis,
+                        asset_is_private=is_private,
+                    )
+                )
+            await session.commit()
+        return vis, is_private
