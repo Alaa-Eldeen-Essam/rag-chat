@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Sidebar } from '../components/Sidebar';
 import { ChatMessageBubble, ChatRole } from '../components/ChatMessage';
 import { useSettings, ModelKind } from '../settings/SettingsContext';
@@ -6,6 +6,8 @@ import { UploadModal } from '../components/UploadModal';
 import { useHttpClient } from '../lib/httpClient';
 import { useStreamClient } from '../lib/streamClient';
 import { t } from '../i18n/ui';
+
+const FOLLOW_THRESHOLD_PX = 120;
 
 interface Conversation {
   id: number;
@@ -21,6 +23,7 @@ interface MessageSource {
   page?: number;
   excerpt_index?: number;
   snippet?: string;
+  asset_id?: number;
 }
 
 interface GroupedSources {
@@ -35,6 +38,9 @@ interface HistoryMessage {
   role: ChatRole;
   content: string;
   sources?: MessageSource[];
+  needs_clarification?: boolean;
+  clarification_question?: string | null;
+  clarification_options?: string[];
   timestamp?: string | null;
 }
 
@@ -75,7 +81,8 @@ export const ChatPage: React.FC = () => {
     chatMode,
     uiLanguage,
     docTypesVersion,
-    setSettings
+    setSettings,
+    apiBaseUrl
   } = useSettings();
   const { request } = useHttpClient();
   const { streamFetch } = useStreamClient();
@@ -123,6 +130,7 @@ export const ChatPage: React.FC = () => {
   const [conversationPage, setConversationPage] = useState(1);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [docTypeError, setDocTypeError] = useState<string | null>(null);
+  const [modeError, setModeError] = useState<string | null>(null);
   const [promptGuardMessage, setPromptGuardMessage] = useState<string | null>(null);
   const MODE_INFO_KEY = 'chat_regular_mode_info_shown';
   const [hasSeenRegularInfo, setHasSeenRegularInfo] = useState<boolean>(() => {
@@ -131,8 +139,37 @@ export const ChatPage: React.FC = () => {
   });
   const [showRegularInfoBanner, setShowRegularInfoBanner] = useState(false);
   const isRegularMode = chatMode === 'regular';
+  const isMultihopMode = chatMode === 'multihop';
+  const [multihopHops, setMultihopHops] = useState<number>(2);
+  const [multihopK, setMultihopK] = useState<number>(6);
+  const [multihopEvidence, setMultihopEvidence] = useState<number>(3);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const pendingScrollToBottomRef = useRef(false);
+  const shouldFollowStreamRef = useRef(true);
   const uiText = (key: Parameters<typeof t>[1]) => t(uiLanguage, key);
   const isRTL = uiLanguage === 'ar';
+  const buildResourceUrl = useCallback(
+    (src: MessageSource) => {
+      if (!apiBaseUrl) return null;
+      const rawId = src.asset_id;
+      const assetId =
+        typeof rawId === 'number' ? rawId : Number(rawId);
+      if (!Number.isFinite(assetId)) return null;
+      const base = apiBaseUrl.replace(/\/$/, '');
+      const fileName = (src.file_name || '').toLowerCase();
+      const isPdf = fileName.endsWith('.pdf');
+      const pageNo =
+        typeof src.page === 'number' ? src.page : Number(src.page);
+      const url = `${base}/api/v1/data/assets/${assetId}/file`;
+      if (isPdf && Number.isFinite(pageNo) && pageNo > 0) {
+        return `${url}#page=${pageNo}`;
+      }
+      return url;
+    },
+    [apiBaseUrl]
+  );
 
   const pinnedSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
 
@@ -245,6 +282,39 @@ export const ChatPage: React.FC = () => {
     });
     return Object.values(groups);
   }, [uiText]);
+
+  const computeScrollFlags = useCallback(() => {
+    const container = chatScrollRef.current;
+    if (!container) {
+      shouldFollowStreamRef.current = true;
+      return;
+    }
+
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const scrollTop = container.scrollTop;
+    const distanceToBottom = maxScrollTop - scrollTop;
+    shouldFollowStreamRef.current = distanceToBottom <= FOLLOW_THRESHOLD_PX;
+  }, []);
+
+  const scrollToBottom = useCallback(
+    (behavior: ScrollBehavior = 'auto') => {
+      const container = chatScrollRef.current;
+      if (!container) return;
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior, block: 'end' });
+      } else {
+        container.scrollTo({ top: container.scrollHeight, behavior });
+      }
+      requestAnimationFrame(() => {
+        computeScrollFlags();
+      });
+    },
+    [computeScrollFlags]
+  );
+
+  const handleChatScroll = useCallback(() => {
+    computeScrollFlags();
+  }, [computeScrollFlags]);
 
   // When the global doc type changes (via the header dropdown),
   // reset any per-chat file filters and related search query so
@@ -372,6 +442,61 @@ export const ChatPage: React.FC = () => {
   }, [request, docTypesVersion, currentDocType]);
 
   useEffect(() => {
+    const container = chatScrollRef.current;
+    if (!container) return;
+    const content = messagesContentRef.current;
+    computeScrollFlags();
+    if (typeof ResizeObserver === 'undefined') return;
+
+    let frame = 0;
+    const scheduleRecompute = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        computeScrollFlags();
+      });
+    };
+
+    const observer = new ResizeObserver(() => {
+      scheduleRecompute();
+    });
+    observer.observe(container);
+    if (content) {
+      observer.observe(content);
+    }
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [computeScrollFlags]);
+
+  useLayoutEffect(() => {
+    let frameOne = 0;
+    let frameTwo = 0;
+
+    if (pendingScrollToBottomRef.current) {
+      pendingScrollToBottomRef.current = false;
+      frameOne = requestAnimationFrame(() => {
+        frameTwo = requestAnimationFrame(() => {
+          scrollToBottom('auto');
+        });
+      });
+      return () => {
+        if (frameOne) cancelAnimationFrame(frameOne);
+        if (frameTwo) cancelAnimationFrame(frameTwo);
+      };
+    }
+
+    frameOne = requestAnimationFrame(() => {
+      computeScrollFlags();
+    });
+    return () => {
+      if (frameOne) cancelAnimationFrame(frameOne);
+      if (frameTwo) cancelAnimationFrame(frameTwo);
+    };
+  }, [messages, computeScrollFlags, scrollToBottom]);
+
+  useEffect(() => {
     if (isRegularMode && !hasSeenRegularInfo) {
       setShowRegularInfoBanner(true);
     }
@@ -384,7 +509,7 @@ export const ChatPage: React.FC = () => {
     setSelectedConversationId(id);
     try {
       const res = await request<ConversationHistoryResponse>(
-        `/api/v1/nlp/conversations/${id}/history?limit=5`
+        `/api/v1/nlp/conversations/${id}/history`
       );
       const historyItems = Array.isArray(res.history) ? res.history : [];
       const mapped: HistoryMessage[] = [];
@@ -410,14 +535,20 @@ export const ChatPage: React.FC = () => {
           });
         }
       });
+      shouldFollowStreamRef.current = true;
+      pendingScrollToBottomRef.current = true;
       setMessages(mapped);
     } catch {
+      shouldFollowStreamRef.current = true;
+      pendingScrollToBottomRef.current = false;
       setMessages([]);
     }
   };
 
   const handleNewChat = () => {
     setSelectedConversationId(null);
+    shouldFollowStreamRef.current = true;
+    pendingScrollToBottomRef.current = false;
     setMessages([]);
   };
 
@@ -468,7 +599,7 @@ export const ChatPage: React.FC = () => {
     }));
   };
 
-  const handleModeChange = (nextMode: 'rag' | 'regular') => {
+  const handleModeChange = (nextMode: 'rag' | 'regular' | 'multihop') => {
     if (nextMode === chatMode) return;
     if (isStreaming) {
       setIsStreaming(false);
@@ -500,16 +631,19 @@ export const ChatPage: React.FC = () => {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || isStreaming) return;
+  const handleSend = async (overrideText?: string) => {
+    const textToSend = (overrideText ?? input).trim();
+    if (!textToSend || isStreaming) return;
     const modeForRequest = chatMode;
     const sendingRegular = modeForRequest === 'regular';
+    const sendingMultihop = modeForRequest === 'multihop';
     if (!sendingRegular && (!currentDocType || currentDocType.trim() === '')) {
       setDocTypeError(uiText('selectDocTypeFirst'));
       return;
     }
     setDocTypeError(null);
-    const userText = input.trim();
+    setModeError(null);
+    const userText = textToSend;
     setInput('');
 
     const userMsg: HistoryMessage = {
@@ -537,6 +671,24 @@ export const ChatPage: React.FC = () => {
         requestBody.asset_ids = assetFilterIds;
       }
     }
+    if (sendingMultihop) {
+      // Client-side validation to surface friendly errors early.
+      if (
+        multihopHops < 1 ||
+        multihopHops > 5 ||
+        multihopK < 1 ||
+        multihopK > 20 ||
+        multihopEvidence < 1 ||
+        multihopEvidence > multihopK
+      ) {
+        setModeError(uiText('multihopParamError'));
+        setIsStreaming(false);
+        return;
+      }
+      requestBody.multihop_hops = multihopHops;
+      requestBody.multihop_k = multihopK;
+      requestBody.multihop_per_hop_evidence = multihopEvidence;
+    }
 
     await streamFetch(
       `/api/v1/nlp/index/answer/${defaultProjectId}`,
@@ -551,6 +703,11 @@ export const ChatPage: React.FC = () => {
         ...prev,
         { id: assistantId, role: 'assistant', content: '', timestamp: new Date().toISOString() }
       ]);
+      if (shouldFollowStreamRef.current) {
+        requestAnimationFrame(() => {
+          scrollToBottom('auto');
+        });
+      }
     },
         onDelta: (delta, _event) => {
           setMessages(prev =>
@@ -560,6 +717,11 @@ export const ChatPage: React.FC = () => {
                 : m
             )
           );
+          if (shouldFollowStreamRef.current) {
+            requestAnimationFrame(() => {
+              scrollToBottom('auto');
+            });
+          }
         },
         onDone: final => {
           setIsStreaming(false);
@@ -577,12 +739,25 @@ export const ChatPage: React.FC = () => {
             assistantId = newId;
           }
           if (final && typeof final.answer === 'string') {
+            const clarificationOptions = Array.isArray((final as any).clarification_options)
+              ? ((final as any).clarification_options as any[])
+                  .map(item => String(item || '').trim())
+                  .filter(Boolean)
+              : [];
+            const needsClarification = Boolean((final as any).needs_clarification);
+            const clarificationQuestion =
+              typeof (final as any).clarification_question === 'string'
+                ? (final as any).clarification_question
+                : null;
             setMessages(prev =>
               prev.map(m =>
                 m.id === assistantId
                   ? {
                       ...m,
                       content: final.answer as string,
+                      needs_clarification: needsClarification,
+                      clarification_question: clarificationQuestion,
+                      clarification_options: clarificationOptions,
                       sources: Array.isArray(final.sources)
                         ? (final.sources as any)
                         : m.sources
@@ -956,7 +1131,7 @@ export const ChatPage: React.FC = () => {
           </button>
         </div>
       </Sidebar>
-      <section className="flex-1 flex flex-col gap-3 min-h-full">
+      <section className="flex-1 flex flex-col gap-3 min-h-0">
         <div className="app-card-soft px-5 py-4 rounded-3xl flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-col gap-1">
@@ -964,33 +1139,44 @@ export const ChatPage: React.FC = () => {
                 {uiText('chat')}
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span>{uiLanguage === 'ar' ? 'الوضع' : 'Mode'}:</span>
-                <div className="inline-flex items-center rounded-full border border-[color:var(--border-subtle)] bg-white p-1">
+                <span>{uiText('mode')}:</span>
+                <div className="inline-flex items-center rounded-full border border-[color:var(--border-subtle)] bg-white p-1 flex-wrap gap-1">
                   <button
                     type="button"
                     onClick={() => handleModeChange('rag')}
                     className={`px-3 py-1 text-[11px] rounded-full ${
-                      !isRegularMode
+                      chatMode === 'rag'
                         ? 'bg-[color:var(--accent)] text-white shadow'
                         : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
                     }`}
                   >
-                    {uiLanguage === 'ar' ? 'وضع RAG' : 'RAG mode'}
+                    {uiText('filesMode')}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleModeChange('regular')}
                     className={`px-3 py-1 text-[11px] rounded-full ${
-                      isRegularMode
+                      chatMode === 'regular'
                         ? 'bg-[color:var(--accent)] text-white shadow'
                         : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
                     }`}
                   >
-                    {uiLanguage === 'ar' ? 'دردشة عادية' : 'Regular chat'}
+                    {uiText('regularChat')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange('multihop')}
+                    className={`px-3 py-1 text-[11px] rounded-full ${
+                      chatMode === 'multihop'
+                        ? 'bg-[color:var(--accent)] text-white shadow'
+                        : 'text-slate-600 hover:text-[color:var(--accent-strong)]'
+                    }`}
+                  >
+                    {uiText('multihopRag')}
                   </button>
                 </div>
               </div>
-            </div>
+              </div>
             {!isRegularMode && (
               <div className="flex flex-col gap-1 text-xs text-slate-500">
                 <span>{uiText('docType')}:</span>
@@ -1010,6 +1196,54 @@ export const ChatPage: React.FC = () => {
                     </option>
                   ))}
                 </select>
+              </div>
+            )}
+            {isMultihopMode && (
+              <div
+                className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500"
+                title={uiText('multihopHelp')}
+              >
+                <label className="flex items-center gap-1">
+                  <span>{uiText('multihopHops')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={multihopHops}
+                    onChange={e => setMultihopHops(Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
+                    className="w-14 rounded-full border border-[color:var(--border-subtle)] px-2 py-1 text-[11px]"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span>{uiText('multihopTopK')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={multihopK}
+                    onChange={e => setMultihopK(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                    className="w-14 rounded-full border border-[color:var(--border-subtle)] px-2 py-1 text-[11px]"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span>{uiText('multihopEvidence')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={multihopEvidence}
+                    onChange={e => setMultihopEvidence(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                    className="w-16 rounded-full border border-[color:var(--border-subtle)] px-2 py-1 text-[11px]"
+                  />
+                </label>
+                <div className="w-full text-[11px] text-slate-400">
+                  {uiText('multihopHelp')}
+                </div>
+                {modeError && (
+                  <div className="text-[11px] text-red-500 font-medium w-full">
+                    {modeError}
+                  </div>
+                )}
               </div>
             )}
             <div className="flex items-center gap-2">
@@ -1032,14 +1266,12 @@ export const ChatPage: React.FC = () => {
           </div>
           {showRegularInfoBanner && isRegularMode && (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-[11px] text-amber-800">
-              {uiLanguage === 'ar'
-                ? 'وضع الدردشة العادية يستخدم نموذجاً عاماً ولا يمكنه الوصول إلى المستندات.'
-                : 'Regular chat uses a general AI model and cannot access your documents.'}
+              {uiText('regularInfo')}
             </div>
           )}
           {!isRegularMode && (
             <div className={`relative flex flex-wrap items-center gap-3 ${isRTL ? 'flex-row-reverse' : ''}`}>
-            <button
+              <button
               type="button"
               className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-subtle)] bg-white px-4 py-2 text-[12px] text-slate-700 hover:border-[color:var(--accent)]"
               onClick={() => setFileDropdownOpen(prev => !prev)}
@@ -1152,9 +1384,14 @@ export const ChatPage: React.FC = () => {
           </div>
           )}
         </div>
-        <div className="flex-1 flex flex-col lg:flex-row gap-4">
-          <div className="flex-1 app-card bg-white flex flex-col rounded-3xl overflow-hidden">
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-4">
+          <div className="relative flex-1 min-h-0 app-card bg-white flex flex-col rounded-3xl overflow-hidden">
+            <div
+              ref={chatScrollRef}
+              onScroll={handleChatScroll}
+              className="flex-1 min-h-0 overflow-y-auto px-5 py-4"
+            >
+              <div ref={messagesContentRef} className="space-y-4">
               {messages.length === 0 && (
                 <div className="app-card-soft p-4 rounded-2xl border border-[color:var(--border-subtle)]">
                   <div className="text-sm font-semibold text-slate-900 mb-1">
@@ -1188,7 +1425,37 @@ export const ChatPage: React.FC = () => {
                           content={m.content}
                           isStreaming={isStreaming && m.role === 'assistant'}
                           onCopy={() => {}}
+                          renderAsMarkdown={m.role === 'assistant'}
+                          copyMode={m.role === 'assistant' ? 'plain_text' : 'raw_markdown'}
                         />
+                        {m.role === 'assistant' &&
+                          m.needs_clarification &&
+                          Array.isArray(m.clarification_options) &&
+                          m.clarification_options.length > 0 && (
+                            <div className="pl-4 md:pl-10">
+                              <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-4 py-3 text-sm text-slate-700 space-y-2">
+                                {m.clarification_question && (
+                                  <div className="text-xs text-slate-600">
+                                    {m.clarification_question}
+                                  </div>
+                                )}
+                                <div className="flex flex-wrap gap-2">
+                                  {m.clarification_options.map((option, idx) => (
+                                    <button
+                                      key={`${m.id}-clarify-${idx}`}
+                                      type="button"
+                                      className="rounded-full border border-[color:var(--border-subtle)] bg-white px-3 py-1 text-xs text-slate-700 hover:border-[color:var(--accent)] hover:text-[color:var(--accent-strong)]"
+                                      onClick={() => {
+                                        void handleSend(option);
+                                      }}
+                                    >
+                                      {option}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
                   {!isRegularMode &&
                     m.role === 'assistant' &&
                     m.sources &&
@@ -1198,7 +1465,18 @@ export const ChatPage: React.FC = () => {
                       return (
                         <div className="pl-4 md:pl-10">
                           <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-4 py-3 text-[15px] text-slate-700 space-y-3">
-                            <div className={`flex flex-wrap items-center justify-between gap-2 ${isRTL ? 'text-right' : 'text-left'}`}>
+                            <div
+                              className={`flex flex-wrap items-center justify-between gap-2 cursor-pointer ${isRTL ? 'text-right' : 'text-left'}`}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => toggleResourcesForMessage(m.id)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  toggleResourcesForMessage(m.id);
+                                }
+                              }}
+                            >
                               <div className="flex items-center gap-3">
                                 <span className="font-semibold text-slate-900 text-base">
                                   {uiText('resources')} ({m.sources.length})
@@ -1208,10 +1486,8 @@ export const ChatPage: React.FC = () => {
                                 </span>
                               </div>
                               <div className="flex items-center gap-2 text-[11px]">
-                                <button
-                                  type="button"
+                                <span
                                   className="text-[11px] text-[color:var(--accent-strong)] underline hover:text-[color:var(--accent)]"
-                                  onClick={() => toggleResourcesForMessage(m.id)}
                                 >
                                   {isExpanded
                                     ? uiLanguage === 'ar'
@@ -1220,7 +1496,7 @@ export const ChatPage: React.FC = () => {
                                     : uiLanguage === 'ar'
                                     ? 'عرض'
                                     : 'Show'}
-                                </button>
+                                </span>
                               </div>
                             </div>
                             {isExpanded && (
@@ -1299,6 +1575,8 @@ export const ChatPage: React.FC = () => {
                   );
                 });
               })()}
+              <div ref={messagesEndRef} className="h-px w-full" />
+              </div>
             </div>
             <div className="border-t border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-5 py-4">
               <form
@@ -1308,7 +1586,11 @@ export const ChatPage: React.FC = () => {
                   handleSend();
                 }}
               >
-                <div className="flex items-center gap-2 flex-wrap">
+                <div
+                  className={`flex items-center gap-2 flex-wrap ${
+                    isRTL ? 'flex-row-reverse' : ''
+                  }`}
+                >
                   <button
                     type="button"
                     className="rounded-full px-3 py-1 text-[12px] border border-[color:var(--border-subtle)] bg-white hover:border-[color:var(--accent)]"
@@ -1567,6 +1849,7 @@ export const ChatPage: React.FC = () => {
                     ? src.location
                     : `${uiText('excerpt')} ${idx + 1}`;
                 const snippet = src.snippet || '';
+                const resourceUrl = buildResourceUrl(src);
                 return (
                   <div
                     key={`${activeResourcePanel.messageId}-panel-${idx}`}
@@ -1581,6 +1864,16 @@ export const ChatPage: React.FC = () => {
                           {loc}
                         </span>
                       </div>
+                      {resourceUrl && (
+                        <a
+                          href={resourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] text-[color:var(--accent-strong)] underline hover:text-[color:var(--accent)]"
+                        >
+                          {uiText('openFile')}
+                        </a>
+                      )}
                     </div>
                     {snippet && (
                       <div className="mt-2 text-[14px] leading-relaxed text-slate-800 whitespace-pre-wrap">

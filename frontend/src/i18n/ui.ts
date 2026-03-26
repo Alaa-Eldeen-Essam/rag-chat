@@ -42,11 +42,22 @@ type Key =
   | 'dismiss'
   | 'of'
   | 'source'
+  | 'openFile'
   | 'excerpt'
   | 'friendlyServerIssue'
   | 'dateToday'
   | 'dateYesterday'
   | 'promptGuardBlocked'
+  | 'mode'
+  | 'filesMode'
+  | 'regularChat'
+  | 'multihopRag'
+  | 'multihopHelp'
+  | 'multihopHops'
+  | 'multihopTopK'
+  | 'multihopEvidence'
+  | 'multihopParamError'
+  | 'regularInfo'
   // Chat
   | 'resources'
   | 'allFiles'
@@ -113,6 +124,8 @@ type Key =
   // Upload modal
   | 'uploadTitle'
   | 'selectFiles'
+  | 'forceOcr'
+  | 'forceOcrHint'
   | 'docTypePlaceholder'
   | 'docTypePlaceholderRequired'
   | 'docTypeRequired'
@@ -254,9 +267,20 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     dismiss: 'Dismiss',
     of: 'of',
     source: 'Source',
+    openFile: 'Open file',
     excerpt: 'Excerpt',
     friendlyServerIssue: "We're still tidying things up. Please try again shortly.",
     promptGuardBlocked: 'This request was blocked by the safety filter. Please ask directly about the documents.',
+    mode: 'Mode',
+    filesMode: 'Files mode',
+    regularChat: 'Regular chat',
+    multihopRag: 'Multihop RAG',
+    multihopHelp: 'Multihop traverses multiple retrieval hops (hops, top K per hop, evidence per hop). Use small numbers to keep it fast.',
+    multihopHops: 'Hops',
+    multihopTopK: 'Top K',
+    multihopEvidence: 'Evidence/hop',
+    multihopParamError: 'Please use 1-5 hops, 1-20 Top K, and evidence ≤ Top K.',
+    regularInfo: 'Regular chat uses a general AI model and cannot access your documents.',
     resources: 'Resources',
     dateToday: 'Today',
     dateYesterday: 'Yesterday',
@@ -320,6 +344,8 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     totalAssetsLabel: 'Total assets',
     uploadTitle: 'Upload and Index Files',
     selectFiles: 'Select files',
+    forceOcr: 'Force OCR',
+    forceOcrHint: 'Run OCR for PDFs even when text is detected.',
     docTypePlaceholder: 'Or enter a new document type...',
     docTypePlaceholderRequired: 'Enter document type (required)...',
     docTypeRequired: 'Document type is required.',
@@ -458,9 +484,20 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     dismiss: 'إغلاق',
     of: 'من',
     source: 'مصدر',
+    openFile: 'فتح الملف',
     excerpt: 'مقتطف',
     friendlyServerIssue: 'نقوم بترتيب الأمور في الخلفية. يرجى المحاولة مرة أخرى بعد قليل.',
     promptGuardBlocked: 'تم حظر هذا الطلب من قبل الحماية. يرجى إعادة صياغته بدون محاولة تغيير تعليمات المساعد.',
+    mode: 'الوضع',
+    filesMode: 'وضع الملفات',
+    regularChat: 'دردشة عادية',
+    multihopRag: 'استرجاع متعدد الحلقات',
+    multihopHelp: 'الوضع متعدد الحلقات يجري أكثر من قفزة استرجاعية (عدد الحلقات، أعلى K لكل حلقة، الأدلة لكل حلقة). استخدم أرقاماً صغيرة للسرعة.',
+    multihopHops: 'الحلقات',
+    multihopTopK: 'أعلى K',
+    multihopEvidence: 'أدلة/حلقة',
+    multihopParamError: 'استخدم 1-5 حلقات، و 1-20 لأعلى K، وعدد الأدلة لا يتجاوز K.',
+    regularInfo: 'وضع الدردشة العادية يستخدم نموذجاً عاماً ولا يمكنه الوصول إلى المستندات.',
     resources: 'المصادر',
     dateToday: 'اليوم',
     dateYesterday: 'أمس',
@@ -524,6 +561,8 @@ const STRINGS: Record<UILanguage, Record<Key, string>> = {
     totalAssetsLabel: 'إجمالي الملفات',
     uploadTitle: 'رفع وفهرسة الملفات',
     selectFiles: 'اختر الملفات',
+    forceOcr: 'فرض OCR',
+    forceOcrHint: 'تشغيل OCR لملفات PDF حتى مع وجود نص.',
     docTypePlaceholder: 'أو أدخل نوع مستند جديد...',
     docTypePlaceholderRequired: 'أدخل نوع المستند (مطلوب)...',
     docTypeRequired: 'نوع المستند مطلوب.',

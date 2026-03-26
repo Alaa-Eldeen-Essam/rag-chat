@@ -4,7 +4,7 @@ from typing import Optional, List
 
 class ProcessRequest(BaseModel):
     file_id: str = None
-    chunk_size: Optional[int] = 500
+    chunk_size: Optional[int] = 1000
     overlap_size: Optional[int] = 100
     do_reset: Optional[int] = 0
     is_private: Optional[bool] = None

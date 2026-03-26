@@ -30,10 +30,15 @@ RUN apt-get update && apt-get install -y \
     libxslt1-dev \
     libffi-dev \
     curl \
+    antiword \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-ara \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Ollama CLI for local reranker execution.
+RUN curl -fsSL https://ollama.com/download/ollama-linux-amd64 -o /usr/local/bin/ollama \
+    && chmod +x /usr/local/bin/ollama
 
 COPY src/requirements.txt .
 

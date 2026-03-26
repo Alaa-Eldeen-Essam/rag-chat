@@ -352,6 +352,127 @@ body {
   transform: translateY(-1px);
 }
 
+.markdown-body {
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.markdown-body > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body table {
+  margin: 0.45rem 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 0.6rem 0 0.35rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text-surface);
+}
+
+.markdown-body h1 {
+  font-size: 1.2rem;
+}
+
+.markdown-body h2 {
+  font-size: 1.1rem;
+}
+
+.markdown-body h3 {
+  font-size: 1.02rem;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-inline-start: 1.1rem;
+}
+
+.markdown-body li + li {
+  margin-top: 0.18rem;
+}
+
+.markdown-body blockquote {
+  border-inline-start: 3px solid var(--accent);
+  padding: 0.3rem 0.7rem;
+  border-radius: 0.4rem;
+  background-color: color-mix(in srgb, var(--bg-soft) 72%, white 28%);
+}
+
+.markdown-body a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown-body a:hover {
+  color: var(--accent);
+}
+
+.markdown-code-inline {
+  padding: 0.08rem 0.35rem;
+  border-radius: 0.35rem;
+  border: 1px solid var(--border-subtle);
+  background-color: color-mix(in srgb, var(--bg-soft) 78%, white 22%);
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.markdown-pre {
+  margin: 0.55rem 0;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  background-color: #0f172a;
+  color: #e2e8f0;
+  padding: 0.75rem 0.85rem;
+  overflow-x: auto;
+}
+
+.markdown-code-block {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.86rem;
+  white-space: pre;
+}
+
+.markdown-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 420px;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border-subtle);
+  padding: 0.35rem 0.55rem;
+  text-align: start;
+  vertical-align: top;
+}
+
+.markdown-body thead {
+  background-color: color-mix(in srgb, var(--bg-soft) 78%, white 22%);
+}
+
 .app-pill {
   @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium;
 }

@@ -47,6 +47,34 @@ $ cp .env.example .env
 
 Set your environment variables in the `.env` file. Like `OPENAI_API_KEY` value.
 
+### Multihop RAG mode
+- Defaults (override in `.env` or `src/.env.example`): `MULTIHOP_MAX_HOPS=2`, `MULTIHOP_PER_HOP_K=6`, `MULTIHOP_PER_HOP_EVIDENCE=3`, optional `MULTIHOP_TEMPERATURE`.
+- API sample (POST `/api/v1/nlp/index/answer/{project_id}`):
+  ```json
+  {
+    "text": "Question that needs multi-step reasoning",
+    "mode": "multihop",
+    "doc_type": "general",
+    "multihop_hops": 2,
+    "multihop_k": 6,
+    "multihop_per_hop_evidence": 3
+  }
+  ```
+- Use the “Multihop RAG” mode toggle in the UI to send these parameters.
+- Example curl:
+  ```bash
+  curl -X POST http://localhost:5000/api/v1/nlp/index/answer/1 \
+    -H "Content-Type: application/json" \
+    -d '{
+      "text": "What did the committee decide and when was it announced?",
+      "mode": "multihop",
+      "doc_type": "general",
+      "multihop_hops": 2,
+      "multihop_k": 6,
+      "multihop_per_hop_evidence": 3
+    }'
+  ```
+
 ## Run Docker Compose Services
 
 ```bash
@@ -70,6 +98,17 @@ From the project root (where `src/main.py` lives):
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 5000
 ```
+mini-rag-app) alaa_eldeen@DESKTOP-7DLQCMS:/mnt/d/Behoos_AI/AI Projects/mini_rag/test_mini_rag/src$ ip route | grep default
+default via 172.23.112.1 dev eth0 proto kernel
+
+
+The chunk size/overlap you can change are passed from the API layer:
+
+Default values for uploads are in data.py (Form defaults):
+chunk_size and overlap_size defaults appear in the upload endpoints (e.g. chunk_size=400, overlap_size=50 and chunk_size=500, overlap_size=100 depending on route). Update those defaults if you want global behavior.
+The processing function itself defaults in ProcessController.py:
+process_file_content(..., chunk_size: int = 500, overlap_size: int = 100).
+
 
 Make sure your vector database and LLM backend (e.g. Ollama) are running and that the corresponding environment variables (`VECTOR_DB_BACKEND`, `GENERATION_BACKEND`, `OPENAI_API_URL`, `GENERATION_MODEL_ID`, etc.) are set.
 

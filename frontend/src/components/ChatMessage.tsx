@@ -1,25 +1,51 @@
-import React from 'react';
+import React, { useMemo, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export type ChatRole = 'user' | 'assistant';
+export type ChatCopyMode = 'plain_text' | 'raw_markdown';
 
 export interface ChatMessageProps {
   role: ChatRole;
   content: string;
   isStreaming?: boolean;
   onCopy?: (content: string) => void;
+  renderAsMarkdown?: boolean;
+  copyMode?: ChatCopyMode;
 }
 
 export const ChatMessageBubble: React.FC<ChatMessageProps> = ({
   role,
   content,
   isStreaming,
-  onCopy
+  onCopy,
+  renderAsMarkdown = false,
+  copyMode = 'raw_markdown'
 }) => {
   const isUser = role === 'user';
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const shouldRenderMarkdown = !isUser && renderAsMarkdown;
+
+  const renderedText = useMemo(() => {
+    if (copyMode === 'raw_markdown') return content;
+    const text = contentRef.current?.innerText;
+    if (typeof text === 'string' && text.trim().length > 0) return text;
+    return content;
+  }, [copyMode, content]);
+
+  const isSafeLink = (href: string): boolean => {
+    const value = href.trim().toLowerCase();
+    return (
+      value.startsWith('http://') ||
+      value.startsWith('https://') ||
+      value.startsWith('mailto:')
+    );
+  };
+
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(content);
-      onCopy?.(content);
+      await navigator.clipboard.writeText(renderedText);
+      onCopy?.(renderedText);
     } catch {
       // no-op
     }
@@ -31,7 +57,57 @@ export const ChatMessageBubble: React.FC<ChatMessageProps> = ({
         <div
           className={`chat-bubble ${isUser ? 'chat-bubble-user' : 'chat-bubble-assistant'} relative overflow-hidden group`}
         >
-          <div className="whitespace-pre-wrap">{content}</div>
+          <div ref={contentRef}>
+            {shouldRenderMarkdown ? (
+              <div className="markdown-body">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  skipHtml
+                  components={{
+                    a: ({ href, children, ...props }) => {
+                      const safeHref = typeof href === 'string' && isSafeLink(href) ? href : '#';
+                      return (
+                        <a
+                          {...props}
+                          href={safeHref}
+                          target="_blank"
+                          rel="noopener noreferrer nofollow"
+                        >
+                          {children}
+                        </a>
+                      );
+                    },
+                    pre: ({ children, ...props }) => (
+                      <pre {...props} className="markdown-pre">
+                        {children}
+                      </pre>
+                    ),
+                    code: ({ children, className, ...props }) => {
+                      const text = String(children ?? '');
+                      const isBlock = Boolean(className) || text.includes('\n');
+                      return (
+                        <code
+                          {...props}
+                          className={isBlock ? 'markdown-code-block' : 'markdown-code-inline'}
+                        >
+                          {children}
+                        </code>
+                      );
+                    },
+                    table: ({ children, ...props }) => (
+                      <div className="markdown-table-wrap">
+                        <table {...props}>{children}</table>
+                      </div>
+                    )
+                  }}
+                >
+                  {content}
+                </ReactMarkdown>
+              </div>
+            ) : (
+              <div className="whitespace-pre-wrap">{content}</div>
+            )}
+          </div>
           {isStreaming && (
             <span className="absolute bottom-3 right-4 h-2 w-6 rounded-full bg-slate-300 animate-pulse" />
           )}

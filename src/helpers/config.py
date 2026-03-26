@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     FILE_ALLOWED_TYPES: list
     FILE_MAX_SIZE: int
     FILE_DEFAULT_CHUNK_SIZE: int
+    RAG_CHUNK_SIZE: int = 1000
+    RAG_CHUNK_OVERLAP: int = 100
 
     POSTGRES_USERNAME: str
     POSTGRES_PASSWORD: str
@@ -85,10 +87,42 @@ class Settings(BaseSettings):
 
     # Reranker
     RERANKER_ENABLED: bool = False
+    RERANKER_BACKEND: Optional[str] = None
     RERANKER_API_URL: Optional[str] = None
     RERANKER_API_KEY: Optional[str] = None
     RERANKER_MODEL_ID: Optional[str] = None
     RERANKER_MAX_CANDIDATES: int = 50
+    RERANKER_TIMEOUT: float = 30.0
+    OLLAMA_RERANKER_MODEL_ID: Optional[str] = None
+    OLLAMA_RERANKER_HOST: Optional[str] = None
+    RERANKER_FALLBACK_MODEL_ID: Optional[str] = None
+
+    # Retrieval weighting
+    RETRIEVAL_DENSE_WEIGHT: float = 0.6
+    RAG_HISTORY_WEIGHT: float = 0.75
+    RAG_HISTORY_MAX_TURNS: int = 8
+    RAG_HISTORY_FOLLOWUP_SIM_THRESHOLD: float = 0.30
+
+    # Evidence synthesis / ambiguity control
+    RAG_AMBIGUITY_ENABLED: bool = True
+    RAG_AMBIGUITY_THRESHOLD: float = 0.12
+    RAG_AMBIGUITY_TOP_N: int = 4
+    RAG_FORCE_CLARIFICATION: bool = True
+    RAG_EVIDENCE_SYNTHESIS_ENABLED: bool = True
+    RAG_EVIDENCE_SYNTHESIS_MAX_DOCS: int = 8
+    RAG_MIN_ANSWER_CONFIDENCE: float = 0.20
+    RAG_GROUNDING_ENABLED: bool = True
+    RAG_GROUNDING_MIN_CLAIM_OVERLAP: float = 0.20
+    RAG_GROUNDING_MAX_UNGROUNDED_CLAIMS: int = 1
+    RAG_GROUNDING_MIN_TOKEN_MATCHES: int = 2
+    RAG_GROUNDING_MIN_GROUNDED_CLAIM_RATIO: float = 0.60
+    RAG_STRICT_DOC_TYPE_FILTER: bool = True
+
+    # Multihop RAG defaults
+    MULTIHOP_MAX_HOPS: int = 2
+    MULTIHOP_PER_HOP_K: int = 6
+    MULTIHOP_PER_HOP_EVIDENCE: int = 3
+    MULTIHOP_TEMPERATURE: Optional[float] = None
 
     # Prompt guard
     PROMPT_GUARD_ENABLED: bool = True
@@ -96,6 +130,15 @@ class Settings(BaseSettings):
     PROMPT_GUARD_PYTECTOR_MODEL: Optional[str] = None
     PROMPT_GUARD_PYTECTOR_THRESHOLD: float = 0.75
     PROMPT_GUARD_BYPASS_HEADER: str = "X-Bypass-Prompt-Guard"
+
+    # Debug payload controls
+    DEBUG_INCLUDE_PROMPTS: bool = False
+
+    # Initial admin bootstrap
+    INITIAL_ADMIN_BOOTSTRAP: bool = True
+    INITIAL_ADMIN_USERNAME: Optional[str] = "admin"
+    INITIAL_ADMIN_PASSWORD: Optional[str] = None
+    INITIAL_ADMIN_PASSWORD_HASH: Optional[str] = None
 
 def get_settings() -> Settings:
     return Settings()

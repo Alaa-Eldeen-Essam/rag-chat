@@ -1,3 +1,7 @@
 /frontend/dist
 /frontend/node_modules
 /models
+/data/arabic_ragb
+/.env
+/src/.env
+__pycache__/

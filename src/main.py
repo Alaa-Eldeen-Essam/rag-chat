@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,8 @@ from routes import auth, base, data, nlp, users, stats
 from helpers.config import get_settings
 from stores.llm.LLMProviderFactory import LLMProviderFactory
 from stores.llm.providers.RerankerProvider import RerankerProvider
+from stores.llm.providers.OllamaCliRerankerProvider import OllamaCliRerankerProvider
+from stores.llm.providers.CrossEncoderRerankerProvider import CrossEncoderRerankerProvider
 from stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
 from stores.llm.templates.template_parser import TemplateParser
 from stores.search import SearchProviderFactory
@@ -18,6 +21,7 @@ from helpers.security import hash_password
 from utils.metrics import setup_metrics
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
 
 setup_metrics(app)
 
@@ -131,31 +135,78 @@ async def startup_span():
 
     app.reranker_client = None
     app.reranker_max_candidates = settings.RERANKER_MAX_CANDIDATES or 0
-    reranker_api_url = settings.RERANKER_API_URL
-    if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
-        reranker_api_url = f"{settings.OLLAMA_RERANKER_API_URL.rstrip('/')}/rerank"
+    reranker_backend = (getattr(settings, "RERANKER_BACKEND", None) or "").strip().lower()
 
-    if (
-        getattr(settings, "RERANKER_ENABLED", False)
-        and reranker_api_url
-        and settings.RERANKER_MODEL_ID
-    ):
-        app.reranker_client = RerankerProvider(
-            api_url=reranker_api_url,
-            api_key=settings.RERANKER_API_KEY,
-            model_id=settings.RERANKER_MODEL_ID,
-        )
+    if getattr(settings, "RERANKER_ENABLED", False):
+        if reranker_backend == "ollama_cli":
+            model_id = settings.OLLAMA_RERANKER_MODEL_ID or settings.RERANKER_MODEL_ID
+            ollama_host = settings.OLLAMA_RERANKER_HOST
+            if not ollama_host:
+                candidate_url = (
+                    getattr(settings, "OLLAMA_CHAT_API_URL", None)
+                    or getattr(settings, "OLLAMA_API_URL", None)
+                )
+                if candidate_url:
+                    ollama_host = candidate_url.rstrip("/")
+                    if ollama_host.endswith("/v1"):
+                        ollama_host = ollama_host[: -len("/v1")]
+            if model_id:
+                app.reranker_client = OllamaCliRerankerProvider(
+                    model_id=model_id,
+                    timeout=settings.RERANKER_TIMEOUT or 30.0,
+                    ollama_host=ollama_host,
+                )
+        elif reranker_backend == "cross_encoder":
+            model_id = settings.RERANKER_MODEL_ID or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            fallback_model_id = getattr(settings, "RERANKER_FALLBACK_MODEL_ID", None) or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            try:
+                app.reranker_client = CrossEncoderRerankerProvider(
+                    model_id=model_id,
+                    fallback_model_id=fallback_model_id,
+                )
+            except Exception as exc:
+                logger.error("Failed to load cross-encoder reranker: %s", exc)
+                app.reranker_client = None
+        else:
+            reranker_api_url = settings.RERANKER_API_URL
+            if not reranker_api_url and getattr(settings, "OLLAMA_RERANKER_API_URL", None):
+                reranker_api_url = f"{settings.OLLAMA_RERANKER_API_URL.rstrip('/')}/rerank"
+
+            if reranker_api_url and settings.RERANKER_MODEL_ID:
+                app.reranker_client = RerankerProvider(
+                    api_url=reranker_api_url,
+                    api_key=settings.RERANKER_API_KEY,
+                    model_id=settings.RERANKER_MODEL_ID,
+                )
 
     user_model = await UserModel.create_instance(
         db_client=app.db_client
     )
-    await user_model.ensure_initial_admin(
-        username="admin",
-        password_hash=hash_password("admin123"),
-    )    
+    bootstrap_enabled = bool(getattr(settings, "INITIAL_ADMIN_BOOTSTRAP", True))
+    bootstrap_username = (getattr(settings, "INITIAL_ADMIN_USERNAME", None) or "").strip()
+    bootstrap_password_hash = (getattr(settings, "INITIAL_ADMIN_PASSWORD_HASH", None) or "").strip()
+    bootstrap_password = getattr(settings, "INITIAL_ADMIN_PASSWORD", None)
+
+    if bootstrap_enabled:
+        if not bootstrap_username:
+            logger.warning("Initial admin bootstrap skipped: INITIAL_ADMIN_USERNAME is empty")
+        else:
+            if not bootstrap_password_hash and bootstrap_password:
+                bootstrap_password_hash = hash_password(bootstrap_password)
+
+            if bootstrap_password_hash:
+                await user_model.ensure_initial_admin(
+                    username=bootstrap_username,
+                    password_hash=bootstrap_password_hash,
+                )
+            else:
+                logger.warning(
+                    "Initial admin bootstrap skipped: set INITIAL_ADMIN_PASSWORD_HASH "
+                    "or INITIAL_ADMIN_PASSWORD in environment"
+                )
 
 async def shutdown_span():
-    app.db_engine.dispose()
+    await app.db_engine.dispose()
     await app.vectordb_client.disconnect()
     search_client = getattr(app, "search_client", None)
     if search_client is not None:

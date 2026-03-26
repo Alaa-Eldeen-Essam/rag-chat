@@ -38,6 +38,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     'idle'
   );
   const [error, setError] = useState<string | null>(null);
+  const [forceOcr, setForceOcr] = useState(false);
   const [docType, setDocType] = useState<string>(
     currentDocType && currentDocType.trim() !== ''
       ? currentDocType
@@ -63,6 +64,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     setCustomDocType('');
     setSelectedDocType('');
     setUseCustomDocType(false);
+    setForceOcr(false);
     setUseCustomDepartment(false);
     if (!currentUserIsAdmin) {
       const dept = currentUserDepartment || 'Global';
@@ -142,6 +144,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         return;
       }
       form.append('doc_type', chosenDocType.trim());
+      form.append('force_ocr', forceOcr ? 'true' : 'false');
       form.append('is_private', isPrivate ? 'true' : 'false');
       form.append('visibility', visibility);
       if (visibility === 'department') {
@@ -280,6 +283,24 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               }
             />
           </label>
+          <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-soft)] px-3 py-2">
+            <label className="flex items-start gap-2 text-[11px] text-slate-600">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={forceOcr}
+                onChange={e => setForceOcr(e.target.checked)}
+              />
+              <span>
+                <span className="block font-semibold text-[12px] text-slate-700">
+                  {uiText('forceOcr')}
+                </span>
+                <span className="block text-[10px] text-slate-500">
+                  {uiText('forceOcrHint')}
+                </span>
+              </span>
+            </label>
+          </div>
           <div className="flex flex-col gap-2">
             <label className="text-slate-600">
               <span className="block mb-1">{uiText('docType')}</span>

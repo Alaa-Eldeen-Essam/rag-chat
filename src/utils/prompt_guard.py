@@ -243,3 +243,12 @@ def evaluate_prompt(
                 source="pytector",
             )
     return PromptGuardResult(blocked=False)
+
+
+def should_bypass_prompt_guard(
+    bypass_requested: bool,
+    current_user: Optional[object],
+) -> bool:
+    if not bypass_requested:
+        return False
+    return bool(getattr(current_user, "is_admin", False))
