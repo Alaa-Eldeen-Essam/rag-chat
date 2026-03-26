@@ -20,7 +20,9 @@ export const SettingsPage: React.FC = () => {
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
-    const { name, value, type, checked } = e.target;
+    const { name, value, type } = e.currentTarget;
+    const checked =
+      e.currentTarget instanceof HTMLInputElement ? e.currentTarget.checked : false;
     setForm(prev => ({
       ...prev,
       [name]: type === 'checkbox' ? checked : value

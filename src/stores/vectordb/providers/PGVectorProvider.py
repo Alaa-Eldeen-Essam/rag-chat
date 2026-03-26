@@ -47,9 +47,9 @@ class PGVectorProvider(VectorDBInterface):
                     await session.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
                     await session.commit()
             except Exception as e:
-                # If extension already exists or any other error, just log and continue
-                self.logger.warning(f"Vector extension setup: {str(e)}")
                 await session.rollback()
+                self.logger.error("Vector extension setup failed: %s", str(e))
+                raise
     async def disconnect(self):
         return
 
@@ -365,14 +365,7 @@ class PGVectorProvider(VectorDBInterface):
             return False
 
         vector_literal = "[" + ",".join([str(v) for v in vector]) + "]"
-        if self.distance_method == PgVectorDistanceMethodEnums.DOT.value:
-            score_expr = (
-                f'1 / (1 + ({PgVectorTableSchemeEnums.VECTOR.value} <=> :vector))'
-            )
-        else:
-            score_expr = (
-                f'1 - ({PgVectorTableSchemeEnums.VECTOR.value} <=> :vector)'
-            )
+        score_expr = self._build_score_expression()
 
         async with self.db_client() as session:
             async with session.begin():
@@ -469,23 +462,12 @@ class PGVectorProvider(VectorDBInterface):
 
         return documents
 
-    async def delete_records(self, collection_name: str, record_ids: List[int]) -> bool:
-        if not record_ids:
-            return True
-
-        if not await self.is_collection_existed(collection_name):
-            return False
-
-        async with self.db_client() as session:
-            async with session.begin():
-                delete_sql = sql_text(
-                    f'DELETE FROM {collection_name} '
-                    f'WHERE {PgVectorTableSchemeEnums.CHUNK_ID.value} = ANY(:chunk_ids)'
-                )
-                await session.execute(delete_sql, {"chunk_ids": record_ids})
-                await session.commit()
-
-        return True
+    def _build_score_expression(self) -> str:
+        if self.distance_method == PgVectorDistanceMethodEnums.DOT.value:
+            # `<#>` returns negative inner product, so negate it to get
+            # a descending similarity score (higher is better).
+            return f'- ({PgVectorTableSchemeEnums.VECTOR.value} <#> :vector)'
+        return f'1 - ({PgVectorTableSchemeEnums.VECTOR.value} <=> :vector)'
 
     async def delete_records(self, collection_name: str, record_ids: List[int]) -> bool:
         if not record_ids:

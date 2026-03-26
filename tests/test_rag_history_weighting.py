@@ -157,7 +157,6 @@ class RagHistoryWeightingTests(unittest.TestCase):
             history_weight=0.75,
         )
         self.assertEqual(len(fused), 3)
-        # With high history weight, chunk_id=2 should stay near the top.
         top_ids = [int((doc.metadata or {}).get("chunk_id")) for doc in fused[:2]]
         self.assertIn(2, top_ids)
 

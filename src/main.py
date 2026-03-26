@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from helpers.security import hash_password
 from utils.metrics import setup_metrics
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
 
 setup_metrics(app)
 
@@ -180,13 +182,31 @@ async def startup_span():
     user_model = await UserModel.create_instance(
         db_client=app.db_client
     )
-    await user_model.ensure_initial_admin(
-        username="admin",
-        password_hash=hash_password("admin123"),
-    )    
+    bootstrap_enabled = bool(getattr(settings, "INITIAL_ADMIN_BOOTSTRAP", True))
+    bootstrap_username = (getattr(settings, "INITIAL_ADMIN_USERNAME", None) or "").strip()
+    bootstrap_password_hash = (getattr(settings, "INITIAL_ADMIN_PASSWORD_HASH", None) or "").strip()
+    bootstrap_password = getattr(settings, "INITIAL_ADMIN_PASSWORD", None)
+
+    if bootstrap_enabled:
+        if not bootstrap_username:
+            logger.warning("Initial admin bootstrap skipped: INITIAL_ADMIN_USERNAME is empty")
+        else:
+            if not bootstrap_password_hash and bootstrap_password:
+                bootstrap_password_hash = hash_password(bootstrap_password)
+
+            if bootstrap_password_hash:
+                await user_model.ensure_initial_admin(
+                    username=bootstrap_username,
+                    password_hash=bootstrap_password_hash,
+                )
+            else:
+                logger.warning(
+                    "Initial admin bootstrap skipped: set INITIAL_ADMIN_PASSWORD_HASH "
+                    "or INITIAL_ADMIN_PASSWORD in environment"
+                )
 
 async def shutdown_span():
-    app.db_engine.dispose()
+    await app.db_engine.dispose()
     await app.vectordb_client.disconnect()
     search_client = getattr(app, "search_client", None)
     if search_client is not None:

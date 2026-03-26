@@ -1,8 +1,6 @@
 import os
 import unittest
 
-from scripts.arabic_ragb_eval import run_benchmark
-
 
 @unittest.skipUnless(
     os.getenv("ARABIC_RAGB_RUN") == "1",
@@ -10,6 +8,8 @@ from scripts.arabic_ragb_eval import run_benchmark
 )
 class ArabicRAGBBenchmarkTest(unittest.TestCase):
     def test_arabic_ragb_benchmark(self) -> None:
+        from scripts.arabic_ragb_eval import run_benchmark
+
         base_url = os.getenv("RAG_BENCH_BASE_URL", "http://localhost:5000")
         doc_type = os.getenv("ARABIC_RAGB_DOC_TYPE", "arabic_ragb")
         limit = int(os.getenv("ARABIC_RAGB_LIMIT", "10"))

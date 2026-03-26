@@ -6,6 +6,45 @@ import time
 # Define metrics
 REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
 REQUEST_LATENCY = Histogram('http_request_duration_seconds', 'HTTP Request Latency', ['method', 'endpoint'])
+PROMPT_GUARD_BYPASS_TOTAL = Counter(
+    "prompt_guard_bypass_total",
+    "Prompt guard bypass header attempts by allow decision",
+    ["allowed"],
+)
+RAG_FALLBACK_TOTAL = Counter(
+    "rag_fallback_total",
+    "RAG fallback answers emitted",
+    ["mode"],
+)
+RAG_CLARIFICATION_TOTAL = Counter(
+    "rag_clarification_total",
+    "RAG clarification responses emitted",
+    ["mode"],
+)
+RAG_CLARIFICATION_DOC_TYPE_TOTAL = Counter(
+    "rag_clarification_doc_type_total",
+    "RAG clarification responses emitted by mode and doc_type",
+    ["mode", "doc_type"],
+)
+MULTIHOP_SCOPE_PROJECTS = Histogram(
+    "multihop_scope_projects",
+    "Number of projects included in multihop retrieval scope",
+)
+INVALID_MODEL_REQUEST_TOTAL = Counter(
+    "invalid_model_request_total",
+    "Requests rejected due to an unknown model key",
+    ["endpoint"],
+)
+PROMPT_PAYLOAD_EXPOSURE_TOTAL = Counter(
+    "prompt_payload_exposure_total",
+    "Prompt payload exposure by endpoint and debug flag",
+    ["endpoint", "included"],
+)
+RAG_GROUNDING_FALLBACK_TOTAL = Counter(
+    "rag_grounding_fallback_total",
+    "RAG fallbacks caused by grounding checks",
+    ["mode"],
+)
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
