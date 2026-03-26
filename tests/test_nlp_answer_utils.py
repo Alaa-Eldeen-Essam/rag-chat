@@ -18,6 +18,8 @@ _spec.loader.exec_module(_module)
 exposed_chat_history = _module.exposed_chat_history
 exposed_full_prompt = _module.exposed_full_prompt
 should_fallback_for_low_confidence = _module.should_fallback_for_low_confidence
+build_clarification_text = _module.build_clarification_text
+iter_stream_chunks = _module.iter_stream_chunks
 
 
 class NlpAnswerUtilsTests(unittest.TestCase):
@@ -52,6 +54,38 @@ class NlpAnswerUtilsTests(unittest.TestCase):
                 min_confidence=0.20,
             )
         )
+
+    def test_build_clarification_text_from_metadata(self):
+        text = build_clarification_text(
+            None,
+            {
+                "clarification_question": "Could you clarify which exact option you mean?",
+                "clarification_options": ["Option A", "Option B"],
+            },
+        )
+        self.assertIn("To answer accurately, which of these are you asking about?", text)
+        self.assertIn("- Option A", text)
+        self.assertIn("- Option B", text)
+
+    def test_build_clarification_text_prefers_direct_string(self):
+        text = build_clarification_text(
+            "  Direct clarification text  ",
+            {"clarification_question": "Ignored"},
+        )
+        self.assertEqual(text, "Direct clarification text")
+
+    def test_iter_stream_chunks_handles_string_and_generator(self):
+        from_string = list(iter_stream_chunks("hello"))
+        self.assertEqual(from_string, ["hello"])
+
+        def _gen():
+            yield "A"
+            yield ""
+            yield None
+            yield "B"
+
+        from_gen = list(iter_stream_chunks(_gen()))
+        self.assertEqual(from_gen, ["A", "B"])
 
 
 if __name__ == "__main__":

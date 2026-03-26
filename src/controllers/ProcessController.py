@@ -34,10 +34,20 @@ class ProcessController(BaseController):
     def get_file_extension(self, file_id: str):
         return os.path.splitext(file_id)[-1]
 
+    def _resolve_file_path(self, file_id: str) -> str:
+        return ProjectController().resolve_project_file_path(
+            project_id=self.project_id,
+            file_name=file_id,
+        )
+
     def get_file_loader(self, file_id: str):
 
         file_ext = self.get_file_extension(file_id=file_id)
-        file_path = os.path.join(self.project_path, file_id)
+        try:
+            file_path = self._resolve_file_path(file_id=file_id)
+        except ValueError:
+            logger.error("Invalid file path requested for loader: %s", file_id)
+            return None
 
         if not os.path.exists(file_path):
             return None
@@ -171,7 +181,11 @@ class ProcessController(BaseController):
         - PDFs with little/no text: fall back to page‑by‑page OCR when enabled.
         """
         file_ext = (self.get_file_extension(file_id=file_id) or "").lower()
-        file_path = os.path.join(self.project_path, file_id)
+        try:
+            file_path = self._resolve_file_path(file_id=file_id)
+        except ValueError:
+            logger.error("Invalid file path requested for content extraction: %s", file_id)
+            return None
 
         if not os.path.exists(file_path):
             return None

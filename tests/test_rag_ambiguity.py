@@ -139,7 +139,15 @@ class RagAmbiguityTests(unittest.TestCase):
         )
         self.assertTrue(result["ambiguity_detected"])
         self.assertTrue(result.get("clarification_question"))
-        self.assertTrue(result.get("clarification_options"))
+        question = str(result.get("clarification_question") or "").lower()
+        self.assertNotIn("which exact option", question)
+        self.assertNotIn("do you mean", question)
+        options = result.get("clarification_options") or []
+        self.assertTrue(options)
+        self.assertLessEqual(len(options), 4)
+        for opt in options:
+            lowered = str(opt).strip().lower()
+            self.assertNotIn(lowered, {"yes", "no", "نعم", "لا"})
 
     def test_conflicting_key_values_in_facts_trigger_ambiguity(self):
         controller = _build_controller()

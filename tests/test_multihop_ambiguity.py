@@ -97,7 +97,7 @@ def _build_controller() -> NLPController:
 
 @unittest.skipIf(NLPController is None, f"NLPController import failed: {IMPORT_ERROR}")
 class MultiHopAmbiguityTests(unittest.TestCase):
-    def test_multihop_conflict_returns_arabic_clarification_prompt_for_ar_query(self):
+    def test_multihop_conflict_returns_guided_arabic_clarification_prompt(self):
         controller = _build_controller()
         analysis = {
             "candidate_answers": [
@@ -113,8 +113,11 @@ class MultiHopAmbiguityTests(unittest.TestCase):
             top_n=4,
         )
         self.assertTrue(result["ambiguity_detected"])
-        self.assertTrue(result.get("clarification_question"))
-        self.assertIn("هل", result.get("clarification_question"))
+        question = str(result.get("clarification_question") or "")
+        self.assertTrue(question)
+        self.assertNotIn("هل", question)
+        options = result.get("clarification_options") or []
+        self.assertTrue(options)
 
 
 if __name__ == "__main__":

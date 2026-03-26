@@ -116,6 +116,9 @@ class _TrackingController(NLPController):
         doc_types=None,
         asset_ids=None,
         keywords=None,
+        embedding_client_override=None,
+        collection_profile_key=None,
+        collection_vector_size=None,
     ):
         project_id = int(getattr(project, "project_id", 0) or 0)
         self.search_calls.append((project_id, text))
@@ -159,6 +162,7 @@ class _TrackingController(NLPController):
         conversation_context=None,
         ambiguity_threshold=None,
         force_clarification=None,
+        max_output_tokens=None,
     ):
         self.captured_docs = list(retrieved_documents)
         return "answer", None, [], {

@@ -98,14 +98,37 @@ def _build_controller() -> NLPController:
 
 @unittest.skipIf(NLPController is None, f"NLPController import failed: {IMPORT_ERROR}")
 class RagHistoryWeightingTests(unittest.TestCase):
+    def test_followup_intent_detects_pronoun_based_followup(self):
+        controller = _build_controller()
+        signal = controller.detect_followup_intent(
+            query="what about that one?",
+            recent_user_questions=["Tell me about the first report."],
+            followup_similarity=0.12,
+            followup_threshold=0.30,
+        )
+        self.assertTrue(bool(signal.get("is_followup")))
+        self.assertTrue(bool(signal.get("has_reference")))
+
+    def test_followup_intent_detects_topic_shift(self):
+        controller = _build_controller()
+        signal = controller.detect_followup_intent(
+            query="new topic: summarize postgres setup",
+            recent_user_questions=["When was the event announced?"],
+            followup_similarity=0.10,
+            followup_threshold=0.30,
+        )
+        self.assertFalse(bool(signal.get("is_followup")))
+        self.assertTrue(bool(signal.get("has_topic_shift_hint")))
+
     def test_adaptive_history_weight_is_high_for_followups(self):
         controller = _build_controller()
         weight = controller.compute_adaptive_history_weight(
             configured_weight=0.75,
             followup_similarity=0.62,
             followup_threshold=0.30,
+            is_followup=True,
         )
-        self.assertAlmostEqual(weight, 0.75, places=3)
+        self.assertGreaterEqual(weight, 0.88)
 
     def test_adaptive_history_weight_drops_for_topic_shift(self):
         controller = _build_controller()
@@ -113,6 +136,7 @@ class RagHistoryWeightingTests(unittest.TestCase):
             configured_weight=0.75,
             followup_similarity=0.08,
             followup_threshold=0.30,
+            is_followup=False,
         )
         self.assertLessEqual(weight, 0.35)
 
@@ -133,7 +157,6 @@ class RagHistoryWeightingTests(unittest.TestCase):
             history_weight=0.75,
         )
         self.assertEqual(len(fused), 3)
-        # With high history weight, chunk_id=2 should stay near the top.
         top_ids = [int((doc.metadata or {}).get("chunk_id")) for doc in fused[:2]]
         self.assertIn(2, top_ids)
 

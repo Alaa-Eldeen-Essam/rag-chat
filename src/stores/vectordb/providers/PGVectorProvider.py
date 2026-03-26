@@ -47,9 +47,9 @@ class PGVectorProvider(VectorDBInterface):
                     await session.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
                     await session.commit()
             except Exception as e:
-                # If extension already exists or any other error, just log and continue
-                self.logger.warning(f"Vector extension setup: {str(e)}")
                 await session.rollback()
+                self.logger.error("Vector extension setup failed: %s", str(e))
+                raise
     async def disconnect(self):
         return
 
