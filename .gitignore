@@ -4,4 +4,8 @@
 /data/arabic_ragb
 /.env
 /src/.env
+/docker/.env
+/tmp.alembic.local.ini
+/.vscode/
 __pycache__/
+*.py[cod]
