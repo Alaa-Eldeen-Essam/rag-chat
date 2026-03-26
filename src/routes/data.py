@@ -55,6 +55,24 @@ def normalize_department_list(values: Optional[List[str]]):
         cleaned.append(value)
     return cleaned
 
+
+def resolve_project_file_path(project_id: int, file_name: str) -> str:
+    return ProjectController().resolve_project_file_path(
+        project_id=project_id,
+        file_name=file_name,
+    )
+
+
+def remove_project_file_if_exists(project_id: int, file_name: str) -> None:
+    try:
+        file_path = resolve_project_file_path(project_id, file_name)
+    except ValueError:
+        logger.error("Refused to remove invalid project file path: %s", file_name)
+        return
+
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
 def resolve_chunk_settings(
     app_settings: Settings,
     chunk_size: int,
@@ -119,6 +137,7 @@ async def upload_data(
         orig_file_name=file.filename,
         project_id=project_id
     )
+    file_path = resolve_project_file_path(project_id, file_id)
 
     try:
         async with aiofiles.open(file_path, "wb") as f:
@@ -166,7 +185,7 @@ async def upload_data(
         asset_user_id=current_user.id,
         asset_type=AssetTypeEnum.FILE.value,
         asset_name=file_id,
-        asset_size=os.path.getsize(file_path),
+        asset_size=os.path.getsize(resolve_project_file_path(project_id, file_id)),
         asset_is_private=(vis == "private"),
         asset_visibility=vis,
         asset_department=effective_department,
@@ -244,6 +263,7 @@ async def upload_process_index(
         orig_file_name=file.filename,
         project_id=project_id
     )
+    file_path = resolve_project_file_path(project_id, file_id)
 
     try:
         async with aiofiles.open(file_path, "wb") as f:
@@ -285,7 +305,7 @@ async def upload_process_index(
         asset_user_id=current_user.id,
         asset_type=AssetTypeEnum.FILE.value,
         asset_name=file_id,
-        asset_size=os.path.getsize(file_path),
+        asset_size=os.path.getsize(resolve_project_file_path(project_id, file_id)),
         asset_is_private=(vis == "private"),
         asset_visibility=vis,
         asset_department=effective_department,
@@ -311,8 +331,7 @@ async def upload_process_index(
     if file_content is None:
         logger.error("Error while processing uploaded file: %s", file_id)
         await asset_model.delete_asset(asset_record)
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        remove_project_file_if_exists(project_id, file_id)
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
@@ -329,8 +348,7 @@ async def upload_process_index(
 
     if not file_chunks:
         await asset_model.delete_asset(asset_record)
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        remove_project_file_if_exists(project_id, file_id)
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
@@ -385,8 +403,7 @@ async def upload_process_index(
             nlp_controller.create_collection_name(project.project_id),
             new_chunk_ids,
         )
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        remove_project_file_if_exists(project_id, file_id)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
@@ -510,6 +527,7 @@ async def upload_process_index_batch(
             orig_file_name=upload_file.filename,
             project_id=project_id
         )
+        file_path = resolve_project_file_path(project_id, file_id)
 
         try:
             async with aiofiles.open(file_path, "wb") as f:
@@ -530,7 +548,7 @@ async def upload_process_index_batch(
             asset_user_id=current_user.id,
             asset_type=AssetTypeEnum.FILE.value,
             asset_name=file_id,
-            asset_size=os.path.getsize(file_path),
+            asset_size=os.path.getsize(resolve_project_file_path(project_id, file_id)),
             asset_is_private=(vis == "private"),
             asset_visibility=vis,
             asset_department=effective_department,
@@ -550,8 +568,7 @@ async def upload_process_index_batch(
         if file_content is None:
             logger.error("Error while processing uploaded file: %s", file_id)
             await asset_model.delete_asset(asset_record)
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            remove_project_file_if_exists(project_id, file_id)
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
@@ -569,8 +586,7 @@ async def upload_process_index_batch(
 
         if not file_chunks:
             await asset_model.delete_asset(asset_record)
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            remove_project_file_if_exists(project_id, file_id)
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
@@ -630,8 +646,7 @@ async def upload_process_index_batch(
                 nlp_controller.create_collection_name(project.project_id),
                 new_chunk_ids,
             )
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            remove_project_file_if_exists(project_id, file_id)
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={
@@ -937,10 +952,10 @@ async def get_asset_file(
             content={"signal": ResponseSignal.FILE_ID_ERROR.value},
         )
 
-    project_path = ProjectController().get_project_path(
-        project_id=asset_record.asset_project_id
+    file_path = resolve_project_file_path(
+        asset_record.asset_project_id,
+        safe_name,
     )
-    file_path = os.path.join(project_path, safe_name)
 
     if not os.path.exists(file_path):
         return JSONResponse(
@@ -1031,10 +1046,10 @@ async def delete_asset(
 
     # Also delete the underlying file from disk if it exists.
     try:
-        project_path = ProjectController().get_project_path(
-            project_id=asset_record.asset_project_id
+        file_path = resolve_project_file_path(
+            asset_record.asset_project_id,
+            asset_record.asset_name,
         )
-        file_path = os.path.join(project_path, asset_record.asset_name)
         if os.path.exists(file_path):
             os.remove(file_path)
     except Exception as exc:
